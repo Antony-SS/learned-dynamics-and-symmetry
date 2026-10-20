@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "learned-dynamics-and-symmetry"
+version = "0.1.0"
+description = "Supervised learning of raw robot dynamics under different input canonicalizations"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "torch",
+    "matplotlib",
+    "pandas",
+    "plotly",
+]
+
+[tool.setuptools]
+packages = ["learned_dynamics", "unicycle", "quadrotor"]
+
+[tool.setuptools.package-dir]
+learned_dynamics = "src/learned_dynamics"
+unicycle = "unicycle"
+quadrotor = "quadrotor"

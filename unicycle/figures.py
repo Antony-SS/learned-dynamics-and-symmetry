@@ -14,14 +14,19 @@ import torch
 from plotly.subplots import make_subplots
 
 from unicycle.data import BASE_LENGTH, METERS_PER_TICK, Trajectory, kept_steps
-from unicycle.rollout import open_loop, residual_open_loop, wheel_open_loop
+from unicycle.geometry import wrap_angle
+from unicycle.rollout import command_open_loop, open_loop, residual_open_loop, wheel_open_loop
 
 VICON = "#1c1c1c"
 UNICYCLE = "#c47b2b"
 COLORS = {
     "naive": "#2f6f9f",
+    "fullstate": "#2f6f9f",
     "canonical": "#2a9d8f",
+    "quotient": "#2a9d8f",
+    "quotient_mirror": "#1b6b63",
     "symmetric": "#6d4c9e",
+    "quotient_symmetry": "#6d4c9e",
     "front_back": "#8a5a44",
     "reversible": "#8a5a44",
     "even_odd": "#2f6b4f",
@@ -213,6 +218,90 @@ def plot_unicycle_rollouts(
     _path_figure(shown, title, traces)
 
 
+def plot_command_rollouts(
+    logs: list[Trajectory],
+    models: list[tuple[str, object, str]],
+    *,
+    set_label: str,
+) -> None:
+    """Whole-log paths from the commanded ``(v, ω)``.
+
+    Each panel is one collection. Vicon is what the robot did. The dashed
+    unicycle is the ideal plant that executed the command exactly. Solid
+    traces are learned command-to-twist maps, also rolled from the first
+    Vicon pose.
+    """
+
+    def traces(log: Trajectory):
+        uni, uni_rmse = command_open_loop(log)
+        lines = [
+            _line(log.poses[:, 0], log.poses[:, 1], name="Vicon", color=VICON, width=2.2),
+            _line(uni[:, 0], uni[:, 1], name="unicycle", color=UNICYCLE, dash="dash", width=1.4),
+        ]
+        notes = [f"unicycle {uni_rmse:.2f} m"]
+        for label, model, color in models:
+            path, rmse = open_loop(model, log)
+            notes.append(f"{label} {rmse:.2f} m")
+            lines.append(_line(path[:, 0], path[:, 1], name=label, color=color, width=1.7))
+        return f"{_short(log.name)}<br>" + " · ".join(notes), lines
+
+    _path_figure(
+        logs,
+        f"{set_label} · overhead, open loop from the first Vicon pose",
+        traces,
+    )
+
+
+plot_dynamics_rollouts = plot_command_rollouts
+
+
+def plot_heading_error(
+    logs: list[Trajectory],
+    models: list[tuple[str, object, str]],
+    *,
+    set_label: str,
+) -> None:
+    """Wrapped heading error vs time on whole-log open-loop rollouts."""
+    fig = make_subplots(
+        rows=len(logs),
+        cols=1,
+        shared_xaxes=False,
+        subplot_titles=[_short(log.name) for log in logs],
+        vertical_spacing=0.08,
+    )
+    seen: set[str] = set()
+    for row, log in enumerate(logs, start=1):
+        time = np.arange(log.n_poses) * float(log.dt)
+        vicon_yaw = np.asarray(log.poses[:, 2], dtype=float)
+        for label, model, color in models:
+            path, _rmse = open_loop(model, log)
+            error = np.degrees(wrap_angle(path[:, 2] - vicon_yaw))
+            fig.add_trace(
+                go.Scatter(
+                    x=time,
+                    y=error,
+                    name=label,
+                    mode="lines",
+                    line=dict(color=color, width=1.6),
+                    legendgroup=label,
+                    showlegend=label not in seen,
+                ),
+                row=row,
+                col=1,
+            )
+            seen.add(label)
+        fig.add_hline(y=0.0, line=dict(color="#bbbbbb", width=1), row=row, col=1)
+        fig.update_yaxes(title_text="heading error (deg)", row=row, col=1)
+    fig.update_xaxes(title_text="time (s)", row=len(logs), col=1)
+    _style(
+        fig,
+        f"{set_label} · heading error, open loop from the first Vicon pose",
+        top=88,
+    )
+    fig.update_layout(height=260 * len(logs) + 80)
+    _show(fig)
+
+
 def plot_rollouts(
     model,
     logs: list[Trajectory],
@@ -241,53 +330,47 @@ def plot_rollouts(
 def plot_loss(result, *, color: str, label: str, others: list | None = None) -> None:
     """Train and held-out window loss, with the saved checkpoint marked."""
     fig = go.Figure()
+    series = [(result, color, label, 2.2)]
     for other, other_color, other_label in others or []:
-        epochs = [row["epoch"] for row in other.history]
+        series.append((other, other_color, other_label, 1.6))
+    for hist, hist_color, hist_label, width in series:
+        epochs = [row["epoch"] for row in hist.history]
         fig.add_trace(
             go.Scatter(
                 x=epochs,
-                y=[row["val_loss"] for row in other.history],
-                name=f"{other_label} validation",
+                y=[row["train_loss"] for row in hist.history],
+                name=f"{hist_label} train",
                 mode="lines",
-                line=dict(color=other_color, width=1.4),
+                line=dict(color=hist_color, width=width),
             )
         )
-    epochs = [row["epoch"] for row in result.history]
-    fig.add_trace(
-        go.Scatter(
-            x=epochs,
-            y=[row["train_loss"] for row in result.history],
-            name=f"{label} train",
-            mode="lines",
-            line=dict(color=color, width=2.2),
+        fig.add_trace(
+            go.Scatter(
+                x=epochs,
+                y=[row["val_loss"] for row in hist.history],
+                name=f"{hist_label} validation",
+                mode="lines",
+                line=dict(color=hist_color, width=width, dash="dash"),
+            )
         )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=epochs,
-            y=[row["val_loss"] for row in result.history],
-            name=f"{label} validation",
-            mode="lines",
-            line=dict(color=color, width=2.2, dash="dash"),
+        best = hist.history[hist.best_epoch]["val_loss"]
+        fig.add_vline(x=hist.best_epoch, line_width=1, line_color=hist_color)
+        fig.add_trace(
+            go.Scatter(
+                x=[hist.best_epoch],
+                y=[best],
+                mode="markers+text",
+                text=[f"{hist_label} best, epoch {hist.best_epoch}"],
+                textposition="top right",
+                marker=dict(color=hist_color, size=8),
+                showlegend=False,
+                hoverinfo="skip",
+            )
         )
-    )
-    best = result.history[result.best_epoch]["val_loss"]
-    fig.add_vline(x=result.best_epoch, line_width=1, line_color=color)
-    fig.add_trace(
-        go.Scatter(
-            x=[result.best_epoch],
-            y=[best],
-            mode="markers+text",
-            text=[f"best path, epoch {result.best_epoch}"],
-            textposition="top right",
-            marker=dict(color=color, size=8),
-            showlegend=False,
-            hoverinfo="skip",
-        )
-    )
-    fig.update_yaxes(type="log", title="5 s position MSE", showgrid=True, gridcolor="#eeeeee")
+    names = [label] + [other_label for _other, _color, other_label in (others or [])]
+    fig.update_yaxes(type="log", title="position MSE", showgrid=True, gridcolor="#eeeeee")
     fig.update_xaxes(title="epoch", range=[0, LOSS_EPOCH_AXIS], showgrid=False)
-    _style(fig, f"{label} loss")
+    _style(fig, " vs ".join(names) + " loss")
     fig.update_layout(height=380, width=720)
     _show(fig)
 

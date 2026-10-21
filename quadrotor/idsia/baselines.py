@@ -3,9 +3,10 @@
 Reimplements Busetto et al. PhysQuadModel / ResidualQuadModel / PhysResQuadModel
 so we can load their published checkpoints and roll them with our integrator.
 
-Their published PhysQuadModel multiplies omega_dot by 0. Physics-only here uses
-the rigid-body Euler equation. Physics+residual loads with that zero in place,
-because that is the physics the residual was trained against.
+Their published PhysQuadModel multiplies omega_dot by 0 (angular velocity is
+held at the window seed while thrust still integrates). Physics-only and the
+frozen physics inside physics+residual both do that, so Melon MAE matches
+their exported ``physics_model_multistep`` predictions.
 """
 
 from __future__ import annotations
@@ -19,11 +20,25 @@ import torch.nn.functional as F
 from quadrotor.canonical import HORIZON_STEPS, PreparedFlight
 from quadrotor.geometry import so3_log_batch
 from quadrotor.idsia.data import DEFAULT_ROOT
+from quadrotor.sequence import _mirror_features
 from quadrotor.train import _so3_exp, _so3_log
 
 DT = 0.01
 PHYS_RES_NAME = "phys+res_random_square_chirp.pt"
 RESIDUAL_NAME = "residual_random_square_chirp.pt"
+SYM_RES_CHECKPOINT = (
+    Path(__file__).resolve().parents[2] / "runs" / "idsia_symmetry" / "phys_sym_res.pt"
+)
+_POLAR_SIGN = {
+    "lr": (1.0, -1.0, 1.0),
+    "fb": (-1.0, 1.0, 1.0),
+    "both": (-1.0, -1.0, 1.0),
+}
+_AXIAL_SIGN = {
+    "lr": (-1.0, 1.0, -1.0),
+    "fb": (1.0, -1.0, -1.0),
+    "both": (-1.0, -1.0, 1.0),
+}
 CRAZYFLIE_PARAMS = {
     "g": 9.81,
     "m": 0.045,
@@ -272,6 +287,90 @@ class PhysResQuadModel(BaseQuadModel):
         return self.x_denorm(self.one_step(self.x_normed(x), u_n))
 
 
+def _mirror_body_dx(dx: torch.Tensor, name: str) -> torch.Tensor:
+    polar = dx.new_tensor(_POLAR_SIGN[name])
+    axial = dx.new_tensor(_AXIAL_SIGN[name])
+    delta_pos, delta_vel, delta_rot, delta_omega = dx.split((3, 3, 3, 3), dim=-1)
+    return torch.cat(
+        (
+            delta_pos * polar,
+            delta_vel * polar,
+            delta_rot * axial,
+            delta_omega * axial,
+        ),
+        dim=-1,
+    )
+
+
+class SymmetricResidual(torch.nn.Module):
+    """MLP on the 13-D canonical input, orbit-averaged over the airframe mirrors."""
+
+    def __init__(self, hidden_dim: int = 64, num_layers: int = 5) -> None:
+        super().__init__()
+        self.hidden_dim = int(hidden_dim)
+        self.num_layers = int(num_layers)
+        layers: list[torch.nn.Module] = []
+        for index in range(num_layers):
+            layers += [
+                torch.nn.Linear(13 if index == 0 else hidden_dim, hidden_dim),
+                torch.nn.ReLU(),
+            ]
+        self.mlp = torch.nn.Sequential(*layers)
+        self.out = torch.nn.Linear(hidden_dim, 12)
+        torch.nn.init.zeros_(self.out.weight)
+        torch.nn.init.zeros_(self.out.bias)
+
+    def body_dx(self, canonical: torch.Tensor) -> torch.Tensor:
+        outputs = []
+        for name in (None, "lr", "fb", "both"):
+            sample = canonical if name is None else _mirror_features(canonical, name)
+            dx = self.out(self.mlp(sample))
+            if name is not None:
+                dx = _mirror_body_dx(dx, name)
+            outputs.append(dx)
+        return torch.stack(outputs).mean(dim=0)
+
+
+class PhysSymResQuadModel(BaseQuadModel):
+    """Frozen IDSIA physics plus a quotient, airframe-equivariant residual.
+
+    The residual never sees world $(x,y,z)$ or yaw. It reads
+    $(g^{body}, v^{body}, \\omega^{body}, \\Omega)$ and writes a body-frame
+    correction that is averaged over the four Crazyflie X mirrors, then
+    pushed back to the world through $R$.
+    """
+
+    def __init__(self, phys: PhysQuadModel, residual: SymmetricResidual) -> None:
+        super().__init__(phys.dt)
+        self.phys = phys
+        self.neural = residual
+        self.register_buffer("canonical_mean", torch.zeros(13))
+        self.register_buffer("canonical_scale", torch.ones(13))
+
+    def _canonical(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        _pos, vel, so3, omega = x.split((3, 3, 3, 3), dim=-1)
+        rotation = _so3_exp(so3)
+        rotation_t = rotation.transpose(-1, -2)
+        up = x.new_tensor((0.0, 0.0, 1.0)).expand(x.shape[0], 3)
+        gravity_body = torch.bmm(rotation_t, up.unsqueeze(-1)).squeeze(-1)
+        velocity_body = torch.bmm(rotation_t, vel.unsqueeze(-1)).squeeze(-1)
+        return torch.cat((gravity_body, velocity_body, omega, u), dim=-1)
+
+    def one_step(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            x_phys = self.phys.one_step(x, u)
+        canonical = (self._canonical(x, u) - self.canonical_mean) / self.canonical_scale
+        dx_body = self.neural.body_dx(canonical)
+        delta_pos, delta_vel, delta_rot, delta_omega = dx_body.split((3, 3, 3, 3), dim=-1)
+        pos_p, vel_p, so3_p, omega_p = x_phys.split((3, 3, 3, 3), dim=-1)
+        rotation = _so3_exp(x[:, 6:9])
+        pos_next = pos_p + torch.bmm(rotation, delta_pos.unsqueeze(-1)).squeeze(-1)
+        vel_next = vel_p + torch.bmm(rotation, delta_vel.unsqueeze(-1)).squeeze(-1)
+        rotation_next = torch.bmm(_so3_exp(so3_p), _so3_exp(delta_rot))
+        omega_next = omega_p + delta_omega
+        return torch.cat((pos_next, vel_next, _so3_log(rotation_next), omega_next), dim=-1)
+
+
 def so3_to_quat_xyzw(rotation_vector: torch.Tensor) -> torch.Tensor:
     theta = torch.linalg.norm(rotation_vector, dim=-1, keepdim=True)
     half = 0.5 * theta
@@ -317,7 +416,8 @@ def _unpack_state(checkpoint: object) -> dict[str, torch.Tensor]:
 
 
 def load_physics(device: str | torch.device = "cpu") -> PhysQuadModel:
-    model = PhysQuadModel(zero_omega_dot=False)
+    """IDSIA PhysQuadModel, including the published ``omega_dot = 0`` step."""
+    model = PhysQuadModel(zero_omega_dot=True)
     model.to(device)
     model.eval()
     return model
@@ -392,10 +492,35 @@ def fit_scalers(
     )
 
 
+def fit_canonical_scalers(
+    flights: list[PreparedFlight],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rows = []
+    for flight in flights:
+        rotation = flight.rotation[:-1]
+        up = np.broadcast_to(np.asarray((0.0, 0.0, 1.0), dtype=np.float32), (len(rotation), 3))
+        gravity_body = np.einsum("nji,nj->ni", rotation, up)
+        velocity_body = np.einsum("nji,nj->ni", rotation, flight.velocity_world[:-1])
+        rows.append(
+            np.concatenate(
+                [gravity_body, velocity_body, flight.omega_body[:-1], flight.pwm],
+                axis=1,
+            )
+        )
+    values = np.concatenate(rows, axis=0)
+    scale = np.clip(np.std(values, axis=0).astype(np.float32), 1e-6, None)
+    return (
+        torch.as_tensor(np.mean(values, axis=0), dtype=torch.float32),
+        torch.as_tensor(scale, dtype=torch.float32),
+    )
+
+
 def _windows(
     flights: list[PreparedFlight],
     horizon: int,
+    stride: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    stride = horizon if stride is None else int(stride)
     xs, us, ys = [], [], []
     for flight in flights:
         so3 = so3_log_batch(flight.rotation).astype(np.float32)
@@ -404,7 +529,7 @@ def _windows(
             axis=1,
         )
         last = flight.n_steps - horizon + 1
-        for start in range(0, last, horizon):
+        for start in range(0, last, stride):
             stop = start + horizon
             xs.append(state[start])
             us.append(flight.pwm[start:stop])
@@ -519,5 +644,162 @@ def load_or_train_idsia_baselines(
         model.to(device)
         model.eval()
     return loaded
+
+
+def load_theirs(
+    train_flights: list[PreparedFlight] | None = None,
+    val_flights: list[PreparedFlight] | None = None,
+    *,
+    root: Path | None = None,
+    device: str | torch.device = "cpu",
+    train_if_missing: bool = True,
+) -> dict[str, torch.nn.Module]:
+    """IDSIA physics and physics+residual only."""
+    loaded: dict[str, torch.nn.Module] = {"physics": load_physics(device)}
+    try:
+        loaded["phys+res"] = load_phys_res(root, device)
+        print(f"loaded IDSIA physics+residual from {_checkpoint_dir(root) / PHYS_RES_NAME}")
+    except FileNotFoundError:
+        if not train_if_missing or train_flights is None or val_flights is None:
+            raise
+        print("IDSIA physics+residual checkpoint missing; training the residual head")
+        loaded["phys+res"] = train_phys_res(
+            train_flights, val_flights, device=device
+        )
+    for model in loaded.values():
+        model.to(device)
+        model.eval()
+    return loaded
+
+
+def _resolve_train_device(device: str | torch.device) -> torch.device:
+    requested = torch.device(device)
+    if requested.type == "cpu" and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return requested
+
+
+def load_phys_sym_res(
+    path: str | Path | None = None,
+    device: str | torch.device = "cpu",
+) -> PhysSymResQuadModel:
+    path = SYM_RES_CHECKPOINT if path is None else Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    checkpoint = torch.load(path, map_location=device, weights_only=False)
+    phys = PhysQuadModel(zero_omega_dot=True)
+    residual = SymmetricResidual(hidden_dim=64, num_layers=5)
+    model = PhysSymResQuadModel(phys, residual)
+    model.load_state_dict(_unpack_state(checkpoint), strict=True)
+    model.to(device)
+    model.eval()
+    return model
+
+
+def train_phys_sym_res(
+    train_flights: list[PreparedFlight],
+    val_flights: list[PreparedFlight],
+    *,
+    epochs: int = 20,
+    horizon: int = HORIZON_STEPS,
+    stride: int = 10,
+    batch_size: int = 128,
+    device: str | torch.device = "cpu",
+    patience: int = 8,
+    checkpoint: str | Path | None = None,
+) -> PhysSymResQuadModel:
+    """Train the symmetric residual head on frozen IDSIA physics."""
+    train_device = _resolve_train_device(device)
+    checkpoint = SYM_RES_CHECKPOINT if checkpoint is None else Path(checkpoint)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    mean, scale = fit_canonical_scalers(train_flights)
+    x_mean, x_scale, _u_mean, _u_scale = fit_scalers(train_flights)
+    phys = PhysQuadModel(zero_omega_dot=True)
+    residual = SymmetricResidual(hidden_dim=64, num_layers=5)
+    model = PhysSymResQuadModel(phys, residual)
+    with torch.no_grad():
+        model.canonical_mean.copy_(mean)
+        model.canonical_scale.copy_(scale)
+    model.to(train_device)
+    y_scale = x_scale.to(train_device).clamp_min(1e-6).view(1, 1, -1)
+    train_x, train_u, train_y = _windows(train_flights, horizon, stride=stride)
+    val_x, val_u, val_y = _windows(val_flights, horizon, stride=stride)
+    optimizer = torch.optim.Adam(model.neural.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=max(epochs, 1), eta_min=1e-6
+    )
+    best = None
+    best_loss = float("inf")
+    stale = 0
+    print(
+        f"phys+sym-res  train on {train_device}  "
+        f"windows {len(train_x)}/{len(val_x)}  horizon {horizon}  stride {stride}",
+        flush=True,
+    )
+    for epoch in range(epochs):
+        model.train()
+        order = torch.randperm(len(train_x))
+        train_loss = 0.0
+        seen = 0
+        for start in range(0, len(order), batch_size):
+            index = order[start : start + batch_size]
+            pred = model(train_x[index].to(train_device), train_u[index].to(train_device))
+            target = train_y[index].to(train_device)
+            loss = ((pred - target) / y_scale).pow(2).mean()
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            train_loss += float(loss.detach()) * len(index)
+            seen += len(index)
+        scheduler.step()
+        model.eval()
+        with torch.no_grad():
+            val_loss = 0.0
+            counted = 0
+            for start in range(0, len(val_x), batch_size):
+                stop = start + batch_size
+                pred = model(val_x[start:stop].to(train_device), val_u[start:stop].to(train_device))
+                target = val_y[start:stop].to(train_device)
+                val_loss += float(((pred - target) / y_scale).pow(2).mean()) * (stop - start)
+                counted += stop - start
+        val_loss /= max(counted, 1)
+        print(
+            f"phys+sym-res  epoch {epoch + 1}/{epochs}  "
+            f"train {train_loss / max(seen, 1):.6f}  val {val_loss:.6f}",
+            flush=True,
+        )
+        if val_loss < best_loss - 1e-6:
+            best_loss = val_loss
+            stale = 0
+            best = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+            torch.save({"model_state": best, "epoch": epoch, "val_loss": best_loss}, checkpoint)
+        else:
+            stale += 1
+            if stale >= patience:
+                print(f"phys+sym-res  early stop at epoch {epoch + 1}", flush=True)
+                break
+    if best is not None:
+        model.load_state_dict(best)
+    model.to(device)
+    model.eval()
+    return model
+
+
+def load_or_train_phys_sym_res(
+    train_flights: list[PreparedFlight],
+    val_flights: list[PreparedFlight],
+    *,
+    device: str | torch.device = "cpu",
+    epochs: int = 20,
+) -> PhysSymResQuadModel:
+    try:
+        model = load_phys_sym_res(device=device)
+        print(f"loaded physics+symmetric-residual from {SYM_RES_CHECKPOINT}")
+        return model
+    except FileNotFoundError:
+        print(f"training physics+symmetric-residual; saving to {SYM_RES_CHECKPOINT}")
+        return train_phys_sym_res(
+            train_flights, val_flights, device=device, epochs=epochs
+        )
 
 

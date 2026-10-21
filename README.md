@@ -6,7 +6,7 @@ Supervised learning of raw robot dynamics. The network predicts the observed ste
 
 - `src/learned_dynamics`: MLP and the full-batch trainer. The saved epoch is the one with the lowest held-out open-loop position error.
 - `unicycle`: Robotarium ground robots. Reads the existing logs in `../robotarium-capstone-data` and does not copy them.
-- `quadrotor`: Crazyflie 2.1 Brushless flights from the [IDSIA nano-drone system-identification benchmark](https://github.com/idsia-robotics/nanodrone-sysid-benchmark). Data stay under gitignored `data/`.
+- `quadrotor`: Crazyflie dynamics. Each benchmark is its own folder: `quadrotor/idsia` (Busetto et al.), `quadrotor/nanobench`, `quadrotor/neurobem`. Data stay under gitignored `data/`.
 
 ## Unicycle
 

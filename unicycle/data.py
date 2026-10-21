@@ -31,6 +31,9 @@ COMMAND_MOVING_SPEED = 0.05
 # Encoder counts stutter by a step or two. Sum this many raw steps, starting
 # at the first pose, and learn the Vicon motion over that same window.
 WINDOW = 3
+# Startup frames in every collection: pose, command, and encoders are garbage
+# for about this long. Dropped in ``load_trajectory`` before coarsening.
+TRIM_S = 0.5
 
 # Logs live next to this repo, not inside it: capstone/robotarium-capstone-data.
 # ``standard_collections`` is the official robot 11 set. ``asymmetry_introduced``
@@ -128,16 +131,28 @@ def load_trajectory(path: str | Path) -> Trajectory:
     if commands.shape != (2, poses.shape[1]):
         raise ValueError(f"commanded_velocities must have shape (2, N), got {commands.shape}")
     gt = poses.T
+    dt = float(log["time_step"])
     if len(gt) < 2:
         raise ValueError(f"{path} has {len(gt)} poses")
     counts = encoder_delta(encoders.T[:-1], encoders.T[1:])
     increments = body_increment(encoders.T[:-1], encoders.T[1:])
+    commands = commands.T[:-1]
+    skip = int(round(TRIM_S / dt)) if TRIM_S > 0 else 0
+    if skip:
+        if len(gt) - skip < 2:
+            raise ValueError(
+                f"{path} has {len(gt)} poses, fewer than a {TRIM_S:g} s trim ({skip} steps)"
+            )
+        gt = gt[skip:]
+        counts = counts[skip:]
+        increments = increments[skip:]
+        commands = commands[skip:]
     return Trajectory(
         name=path.parent.name,
         poses=gt,
         increments=np.asarray(increments, dtype=float),
-        commands=commands.T[:-1],
-        dt=float(log["time_step"]),
+        commands=np.asarray(commands, dtype=float),
+        dt=dt,
         path=str(path),
         counts=np.asarray(counts, dtype=float),
     )
@@ -172,6 +187,29 @@ def coarsen(log: Trajectory, window: int = WINDOW) -> Trajectory:
     )
 
 
+def mirror_log(log: Trajectory) -> Trajectory:
+    """Left–right copy of a log. ``y`` and heading flip, ``ω`` flips, wheels swap."""
+    poses = np.asarray(log.poses, dtype=float).copy()
+    poses[:, 1] *= -1.0
+    poses[:, 2] = (-poses[:, 2] + np.pi) % (2.0 * np.pi) - np.pi
+    increments = np.asarray(log.increments, dtype=float).copy()
+    increments[:, 1] *= -1.0
+    commands = np.asarray(log.commands, dtype=float).copy()
+    commands[:, 1] *= -1.0
+    counts = None
+    if log.counts is not None:
+        counts = np.asarray(log.counts, dtype=float)[:, ::-1].copy()
+    return Trajectory(
+        name=f"{log.name} (mirror)",
+        poses=poses,
+        increments=increments,
+        commands=commands,
+        dt=log.dt,
+        path=log.path,
+        counts=counts,
+    )
+
+
 def _segment(log: Trajectory, start: int, stop: int, label: str) -> Trajectory:
     """Poses ``[start, stop)`` and the wheel steps that connect them."""
     poses = log.poses[start:stop]
@@ -198,8 +236,13 @@ def _held_out_cut(steps: int) -> int:
     return steps - held_steps
 
 
-def _load_named(root: str | Path) -> dict[str, Trajectory]:
-    """Coarsened official collections, keyed by folder name."""
+def load_raw_named(root: str | Path = DEFAULT_ROOT) -> dict[str, Trajectory]:
+    """Official collections at the encoder rate, after the startup trim, not coarsened."""
+    return _load_named(root, coarsen_logs=False)
+
+
+def _load_named(root: str | Path, *, coarsen_logs: bool = True) -> dict[str, Trajectory]:
+    """Official collections, keyed by folder name."""
     root = Path(root)
     paths = sorted(root.glob("*/*.npz"))
     if not paths:
@@ -208,7 +251,9 @@ def _load_named(root: str | Path) -> dict[str, Trajectory]:
         )
     found: dict[str, Trajectory] = {}
     for path in paths:
-        log = coarsen(load_trajectory(path))
+        log = load_trajectory(path)
+        if coarsen_logs:
+            log = coarsen(log)
         if log.name in found:
             raise ValueError(f"two logs named {log.name} under {root}")
         found[log.name] = log

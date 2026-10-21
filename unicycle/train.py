@@ -16,18 +16,36 @@ import numpy as np
 import torch
 
 from learned_dynamics.train import TrainResult
-from unicycle.data import MAX_LINEAR_VELOCITY, Trajectory, kept_steps
-from unicycle.rollout import held_out_heading_rmse, held_out_rmse
+from unicycle.data import MAX_LINEAR_VELOCITY, ROBOT_DIAMETER, Trajectory, kept_steps
+from unicycle.geometry import body_steps
+from unicycle.models import history_slice, rollout_command_velocity
+from unicycle.rollout import (
+    held_out_heading_rmse,
+    held_out_rmse,
+    pooled_rollout_position_mse,
+)
 
 # One folder, overwritten on each training run. Plot cells read these files.
 CHECKPOINT_DIR = Path(__file__).resolve().parents[1] / "runs" / "unicycle"
 
 HORIZON_S = 5.0
+VAL_HORIZON_S = 30.0
+VAL_STRIDE_S = 1.0
 # Wrapped heading enters the loss as meters of arc after one second at the
 # linear speed cap. On the unicycle's 5 s windows that matches the RMS of one
 # position component, so yaw does not drown xy and xy does not drown yaw.
 HEADING_LENGTH = MAX_LINEAR_VELOCITY
+# Encoder velocity enters the 5 s loss as m/s and as yaw arc at half the
+# robot diameter, so it sits on the same scale as a one-step pose error.
+VELOCITY_WEIGHT = 1.0
 _ANGLE_EPS = 1e-8
+
+
+def _module_device(model: torch.nn.Module) -> torch.device:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return next(model.buffers()).device
 
 
 def _se2_exp(xi: torch.Tensor) -> torch.Tensor:
@@ -68,8 +86,17 @@ def _integrate_batch(relative: torch.Tensor, origin: torch.Tensor) -> torch.Tens
     return torch.stack((x, y), dim=-1)
 
 
-def _command(model: torch.nn.Module, counts: torch.Tensor, increments: torch.Tensor) -> torch.Tensor:
-    """Raw tick increments for models that ask for them, otherwise the wheel step."""
+def _command(
+    model: torch.nn.Module,
+    counts: torch.Tensor,
+    increments: torch.Tensor,
+    commands: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Commanded (v, ω), raw ticks, or the wheel step, depending on the model."""
+    if getattr(model, "reads_command", False):
+        if commands is None:
+            raise ValueError("this model reads commanded velocities, and none were passed")
+        return commands
     if getattr(model, "reads_counts", False):
         return counts
     return increments
@@ -81,19 +108,61 @@ def _predicted_relative(
     increments: torch.Tensor,
     residual: bool,
     poses: torch.Tensor | None = None,
-) -> torch.Tensor:
-    features = _command(model, counts, increments)
+    commands: torch.Tensor | None = None,
+    nu0: torch.Tensor | None = None,
+    dt: float | None = None,
+    hidden: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    if getattr(model, "uses_velocity", False):
+        if commands is None or nu0 is None or dt is None:
+            raise ValueError("a velocity-state model needs the command, a seed twist, and dt")
+        velocity = rollout_command_velocity(
+            model,
+            nu0,
+            commands,
+            dt,
+            hidden=hidden,
+            poses=poses if getattr(model, "uses_pose", False) else None,
+        )
+        twist = _body_twist(velocity, dt)
+        return _se2_exp(twist), velocity
+    features = _command(model, counts, increments, commands)
     if getattr(model, "uses_pose", False):
         if poses is None:
             raise ValueError("a pose-conditioned model needs the logged pose at each step")
         features = torch.cat((features, poses), dim=-1)
     if not residual:
-        return _se2_exp(model(features))
+        return _se2_exp(model(features)), None
     twist = torch.stack(
         (increments[..., 0], torch.zeros_like(increments[..., 0]), increments[..., 1]),
         dim=-1,
     )
-    return _compose_relative(_se2_exp(twist), _se2_exp(model(features)))
+    return _compose_relative(_se2_exp(twist), _se2_exp(model(features))), None
+
+
+def _body_twist(velocity: torch.Tensor, dt: float) -> torch.Tensor:
+    """Tangent step ``(v dt, v_y dt, ω dt)``. Two-wide ``ν`` has ``v_y = 0``."""
+    if velocity.shape[-1] == 3:
+        return torch.stack(
+            (velocity[..., 0] * dt, velocity[..., 1] * dt, velocity[..., 2] * dt),
+            dim=-1,
+        )
+    zeros = velocity.new_zeros(velocity.shape[:-1])
+    return torch.stack((velocity[..., 0] * dt, zeros, velocity[..., 1] * dt), dim=-1)
+
+
+def _measured_velocity(
+    model: torch.nn.Module,
+    increments: np.ndarray,
+    vicon: np.ndarray,
+    dt: float,
+) -> np.ndarray:
+    encoder = increments / dt
+    if getattr(model, "has_sideslip", False):
+        return np.stack((encoder[:, 0], vicon[:, 1], encoder[:, 1]), axis=1).astype(np.float32)
+    if getattr(model, "seeds_vicon", False):
+        return vicon[:, [0, 2]].astype(np.float32)
+    return encoder.astype(np.float32)
 
 
 def _half_width(dt: float, horizon_s: float) -> int:
@@ -121,13 +190,19 @@ def _centers(
                 f"{log.name} has {n_steps} steps, shorter than a {horizon_s:.0f} s window ({width} steps)"
             )
         counts = None if log.counts is None else np.asarray(log.counts, dtype=np.float32)
+        poses = np.asarray(log.poses, dtype=np.float32)
+        vicon = body_steps(poses)
+        vicon_nu = (vicon / float(log.dt)).astype(np.float32)
         prepared.append(
             (
                 counts,
                 np.asarray(log.increments, dtype=np.float32),
-                np.asarray(log.poses, dtype=np.float32),
+                poses,
                 kept_steps(log),
                 half,
+                np.asarray(log.commands, dtype=np.float32),
+                float(log.dt),
+                vicon_nu,
             )
         )
         for center in range(half, n_steps - half):
@@ -146,22 +221,55 @@ def _batch_mse(
     increments = []
     poses = []
     keep = []
+    commands = []
+    seeds = []
+    measured_nu = []
+    dts = []
     for index, center in pairs:
-        count, inc, pose, kept, half = prepared[index]
+        count, inc, pose, kept, half, command, dt, vicon = prepared[index]
         if getattr(model, "reads_counts", False) and count is None:
             raise ValueError("this model reads raw encoder increments, and a log has none")
         if count is None:
             count = inc
-        counts.append(count[center - half : center + half + 1])
-        increments.append(inc[center - half : center + half + 1])
-        poses.append(pose[center - half : center + half + 2])
-        keep.append(kept[center - half : center + half + 1])
-    device = next(model.parameters()).device
+        start = center - half
+        counts.append(count[start : center + half + 1])
+        increments.append(inc[start : center + half + 1])
+        poses.append(pose[start : center + half + 2])
+        keep.append(kept[start : center + half + 1])
+        commands.append(command[start : center + half + 1])
+        measured = _measured_velocity(model, inc, vicon, dt)
+        seed = measured[start - 1] if start > 0 else measured[start]
+        seeds.append(seed)
+        measured_nu.append(measured[start : center + half + 1])
+        dts.append(dt)
+    device = _module_device(model)
     count = torch.as_tensor(np.stack(counts), device=device)
     step = torch.as_tensor(np.stack(increments), device=device)
     pose = torch.as_tensor(np.stack(poses), device=device)
     kept = torch.as_tensor(np.stack(keep), device=device)
-    relative = _predicted_relative(model, count, step, residual, pose[:, :-1])
+    command = torch.as_tensor(np.stack(commands), device=device)
+    nu0 = torch.as_tensor(np.stack(seeds), device=device)
+    measured = torch.as_tensor(np.stack(measured_nu), device=device)
+    dt = float(dts[0])
+    hidden = None
+    if getattr(model, "uses_hidden", False):
+        warm = int(model.history_steps(dt))
+        warms_nu = []
+        warms_u = []
+        for index, center in pairs:
+            _count, inc, _pose, _kept, half, command_np, log_dt, vicon = prepared[index]
+            start = center - half
+            measured_np = _measured_velocity(model, inc, vicon, log_dt)
+            nu_h, u_h = history_slice(measured_np, command_np, start, warm)
+            warms_nu.append(nu_h)
+            warms_u.append(u_h)
+        hidden = model.warm_hidden(
+            torch.as_tensor(np.stack(warms_nu), device=device),
+            torch.as_tensor(np.stack(warms_u), device=device),
+        )
+    relative, velocity = _predicted_relative(
+        model, count, step, residual, pose[:, :-1], command, nu0, dt, hidden
+    )
     xy = _integrate_batch(relative, pose[:, 0])
     squared = (xy - pose[:, 1:, :2]) ** 2
     if yaw_length is not None:
@@ -173,6 +281,16 @@ def _batch_mse(
     if not bool(kept.any()):
         raise ValueError("a 5 s batch has no steps inside the loss mask")
     loss = squared[kept].mean()
+    if velocity is not None:
+        speed = velocity[..., 0] - measured[..., 0]
+        if velocity.shape[-1] == 3:
+            slip = velocity[..., 1] - measured[..., 1]
+            arc = (velocity[..., 2] - measured[..., 2]) * (0.5 * ROBOT_DIAMETER)
+            extra = speed[kept] ** 2 + slip[kept] ** 2 + arc[kept] ** 2
+        else:
+            arc = (velocity[..., 1] - measured[..., 1]) * (0.5 * ROBOT_DIAMETER)
+            extra = speed[kept] ** 2 + arc[kept] ** 2
+        loss = loss + VELOCITY_WEIGHT * extra.mean()
     penalty = getattr(model, "asymmetry_penalty", None)
     if model.training and penalty is not None:
         loss = loss + penalty(count[kept])
@@ -208,6 +326,7 @@ def train_open_loop(
     batch_size: int = 64,
     residual: bool = False,
     horizon_s: float = HORIZON_S,
+    val_horizon_s: float = VAL_HORIZON_S,
     yaw_length: float | None = None,
     name: str = "unicycle",
     patience: int | None = None,
@@ -221,15 +340,16 @@ def train_open_loop(
     ``Exp(model(v, ω))``. ``residual=True`` integrates ``Z ∘ Exp(model(v, ω))``.
 
     ``patience`` stops the run after that many epochs in a row with no drop in
-    the validation 5 s window loss. ``min_delta`` is the smallest drop that
-    counts. With ``yaw_length``, that same yaw-inclusive validation loss also
-    selects the checkpoint. Without it, full validation xy RMSE selects the
-    checkpoint as before. ``eval_logs`` is validation, never the test set.
+    the validation ``val_horizon_s`` position MSE. ``min_delta`` is the smallest
+    drop that counts. That same 30 s validation MSE selects the checkpoint.
+    ``eval_logs`` is validation, never the test set.
     """
     if epochs < 0:
         raise ValueError(f"epochs must be non-negative, got {epochs}")
     if horizon_s <= 0:
         raise ValueError(f"horizon_s must be positive, got {horizon_s}")
+    if val_horizon_s <= 0:
+        raise ValueError(f"val_horizon_s must be positive, got {val_horizon_s}")
     if rollout_every <= 0:
         raise ValueError(f"rollout_every must be positive, got {rollout_every}")
     if batch_size < 1:
@@ -243,13 +363,16 @@ def train_open_loop(
     eval_data, eval_pairs = _centers(eval_logs, horizon_s)
     half = train_data[0][4]
     yaw_note = "" if yaw_length is None else f"  heading × {yaw_length:.3f} m/rad"
+    val_stride = max(1, int(round(VAL_STRIDE_S / float(eval_logs[0].dt))))
     print(
-        f"{name:8s}  {horizon_s:.0f} s windows  {2 * half + 1} steps  "
-        f"train {len(train_pairs)}  validation {len(eval_pairs)}  batch {batch_size}{yaw_note}",
+        f"{name:8s}  {horizon_s:.0f} s train windows  {2 * half + 1} steps  "
+        f"train {len(train_pairs)}  validation {len(eval_pairs)}  batch {batch_size}  "
+        f"val {val_horizon_s:.0f} s mse  stride {val_stride}{yaw_note}",
         flush=True,
     )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
+    optimizer = torch.optim.Adam(trainable, lr=lr) if trainable else None
     history: list[dict] = []
     best_error = float("inf")
     best_epoch = 0
@@ -261,6 +384,10 @@ def train_open_loop(
 
     for epoch in range(epochs + 1):
         if epoch == 0:
+            model.eval()
+            with torch.no_grad():
+                loss = _mean_mse(model, train_data, train_pairs, residual, batch_size, yaw_length)
+        elif optimizer is None:
             model.eval()
             with torch.no_grad():
                 loss = _mean_mse(model, train_data, train_pairs, residual, batch_size, yaw_length)
@@ -282,15 +409,24 @@ def train_open_loop(
 
         with torch.no_grad():
             model.eval()
-            val_loss = _mean_mse(model, eval_data, eval_pairs, residual, batch_size, yaw_length)
+            val_loss = float(
+                pooled_rollout_position_mse(
+                    model,
+                    eval_logs,
+                    residual=residual,
+                    horizon_s=val_horizon_s,
+                    start_stride=val_stride,
+                )
+            )
         row = {
             "epoch": epoch,
             "train_loss": float(loss.detach()),
-            "val_loss": float(val_loss.detach()),
+            "val_loss": val_loss,
         }
         selected = False
-        if yaw_length is not None and row["val_loss"] < best_objective:
-            best_objective = row["val_loss"]
+        if val_loss < best_objective:
+            best_objective = val_loss
+            best_error = val_loss
             best_epoch = epoch
             best_state = {
                 key: value.detach().cpu().clone() for key, value in model.state_dict().items()
@@ -299,9 +435,9 @@ def train_open_loop(
         stopping = False
         if patience is not None:
             if epoch == 0:
-                best_val = row["val_loss"]
-            elif row["val_loss"] < best_val - min_delta:
-                best_val = row["val_loss"]
+                best_val = val_loss
+            elif val_loss < best_val - min_delta:
+                best_val = val_loss
                 since_improvement = 0
             else:
                 since_improvement += 1
@@ -314,32 +450,23 @@ def train_open_loop(
                 heading = float(held_out_heading_rmse(model, eval_logs, residual=residual))
                 row["held_out_heading_rmse"] = heading
                 heading_note = f"  heading {np.degrees(heading):.2f} deg"
-            mark = ""
-            if yaw_length is None and error < best_error:
-                best_error = error
-                best_epoch = epoch
-                best_state = {
-                    key: value.detach().cpu().clone() for key, value in model.state_dict().items()
-                }
-                selected = True
-            if selected:
-                mark = "  saved"
-            rmse_note = f"  validation position RMSE {error:.4f} m{heading_note}{mark}"
+            mark = "  saved" if selected else ""
+            rmse_note = f"  full val RMSE {error:.4f} m{heading_note}{mark}"
         else:
             row["held_out_position_rmse"] = float("nan")
             if yaw_length is not None:
                 row["held_out_heading_rmse"] = float("nan")
-            rmse_note = ""
+            rmse_note = "  saved" if selected else ""
         print(
             f"{name:8s}  epoch {epoch:02d}  5s mse {row['train_loss']:.6e}  "
-            f"val {row['val_loss']:.6e}{rmse_note}",
+            f"val {val_horizon_s:.0f}s mse {val_loss:.6e}{rmse_note}",
             flush=True,
         )
         history.append(row)
         if stopping:
             print(
                 f"{name:8s}  early stop at epoch {epoch:02d}  "
-                f"validation 5 s mse flat for {patience} epochs",
+                f"validation {val_horizon_s:.0f} s mse flat for {patience} epochs",
                 flush=True,
             )
             break
@@ -347,11 +474,19 @@ def train_open_loop(
             break
 
     model.load_state_dict(best_state)
-    best_error = float(held_out_rmse(model, eval_logs, residual=residual))
-    criterion = "yaw-inclusive 5 s validation MSE" if yaw_length is not None else "validation position RMSE"
+    best_error = float(
+        pooled_rollout_position_mse(
+            model,
+            eval_logs,
+            residual=residual,
+            horizon_s=val_horizon_s,
+            start_stride=val_stride,
+        )
+    )
     print(
         f"{name:8s}  best epoch {best_epoch:02d}  "
-        f"validation position RMSE {best_error:.4f} m  selected by {criterion}"
+        f"validation {val_horizon_s:.0f} s mse {best_error:.6e}  "
+        f"selected by validation {val_horizon_s:.0f} s position MSE"
     )
     return TrainResult(history=history, best_epoch=best_epoch, best_error=best_error)
 
@@ -398,6 +533,19 @@ def save_checkpoint(
     penalty = getattr(model, "penalty", None)
     if penalty is not None:
         payload["penalty"] = float(penalty)
+    tau = getattr(model, "tau", None)
+    if tau is not None:
+        payload["tau_v"] = float(tau[0])
+        payload["tau_omega"] = float(tau[1])
+    if getattr(model, "uses_hidden", False):
+        payload["hidden"] = int(model.hidden_size)
+        payload["history_s"] = float(model.history_s)
+    scale = getattr(model, "delta_scale", None)
+    if scale is None and name.endswith("_norm"):
+        scale = getattr(model, "residual_limit", None)
+    if scale is not None:
+        payload["delta_v"] = float(scale[0])
+        payload["delta_omega"] = float(scale[1])
     (folder / f"{name}.json").write_text(json.dumps(payload))
     print(f"{name:8s}  wrote {folder / name}.pt")
 
@@ -406,6 +554,20 @@ def load_checkpoint(name: str, *, folder: Path = CHECKPOINT_DIR) -> tuple[torch.
     """Load the saved weights and the loss history for ``name``."""
     from unicycle.models import (
         CanonicalModel,
+        DynamicsFullState,
+        DynamicsQuotient,
+        DynamicsQuotientSymmetry,
+        CommandCanonicalInstant,
+        CommandCanonicalModel,
+        CommandLagModel,
+        CommandSymmetricFree,
+        CommandSymmetricGRU,
+        CommandSymmetricInstant,
+        CommandSymmetricInstantFrontBack,
+        CommandSymmetricInstantGRU,
+        CommandSymmetricInstantNorm,
+        CommandSymmetricInstantSlip,
+        CommandSymmetricModel,
         FrontBackSymmetricModel,
         NaiveModel,
         EvenOddModel,
@@ -418,6 +580,23 @@ def load_checkpoint(name: str, *, folder: Path = CHECKPOINT_DIR) -> tuple[torch.
     classes = {
         "naive": NaiveModel,
         "canonical": CanonicalModel,
+        "dynamics_fullstate": DynamicsFullState,
+        "dynamics_quotient": DynamicsQuotient,
+        "dynamics_quotient_mirror": DynamicsQuotient,
+        "dynamics_quotient_symmetry": DynamicsQuotientSymmetry,
+        "command_lag": CommandLagModel,
+        "command_canonical": CommandCanonicalModel,
+        "command_canonical_mirror": CommandCanonicalModel,
+        "command_canonical_instant": CommandCanonicalInstant,
+        "command_symmetric": CommandSymmetricModel,
+        "command_symmetric_gru": CommandSymmetricGRU,
+        "command_symmetric_instant": CommandSymmetricInstant,
+        "command_symmetric_instant_gru": CommandSymmetricInstantGRU,
+        "command_symmetric_instant_frontback": CommandSymmetricInstantFrontBack,
+        "command_symmetric_instant_10s": CommandSymmetricInstant,
+        "command_symmetric_instant_norm": CommandSymmetricInstantNorm,
+        "command_symmetric_instant_slip": CommandSymmetricInstantSlip,
+        "command_symmetric_free": CommandSymmetricFree,
         "symmetric": SymmetricModel,
         "reversible": ReversibleSymmetricModel,
         "front_back": FrontBackSymmetricModel,
@@ -434,6 +613,16 @@ def load_checkpoint(name: str, *, folder: Path = CHECKPOINT_DIR) -> tuple[torch.
     kwargs = {}
     if "penalty" in payload:
         kwargs["penalty"] = float(payload["penalty"])
+    if "tau_v" in payload:
+        kwargs["tau_v"] = float(payload["tau_v"])
+        kwargs["tau_omega"] = float(payload["tau_omega"])
+    if "delta_v" in payload:
+        kwargs["delta_v"] = float(payload["delta_v"])
+        kwargs["delta_omega"] = float(payload["delta_omega"])
+    if "hidden" in payload:
+        kwargs["hidden"] = int(payload["hidden"])
+    if "history_s" in payload:
+        kwargs["history_s"] = float(payload["history_s"])
     model = classes[name](**kwargs)
     model.load_state_dict(torch.load(folder / f"{name}.pt", weights_only=True))
     model.eval()

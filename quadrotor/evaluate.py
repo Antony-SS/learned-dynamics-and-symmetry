@@ -6,7 +6,59 @@ import numpy as np
 import torch
 
 from quadrotor.canonical import HORIZON_STEPS, PreparedFlight
-from quadrotor.train import _integrate, _so3_log, module_device
+from quadrotor.train import _features, _integrate, _so3_log, module_device
+
+
+def _recurrent_step(
+    model: torch.nn.Module,
+    features: torch.Tensor,
+    hidden: torch.Tensor,
+) -> torch.Tensor:
+    step = getattr(model, "step", None)
+    if callable(step):
+        _acceleration, hidden = step(features, hidden)
+        return hidden
+    neural = getattr(model, "neural", None)
+    if neural is not None and callable(getattr(neural, "step", None)):
+        _acceleration, hidden = neural.step(features, hidden)
+        return hidden
+    return hidden
+
+
+def teacher_forced_hiddens(
+    model: torch.nn.Module,
+    flight: PreparedFlight,
+    *,
+    voltage_value: float | None = None,
+) -> list[torch.Tensor]:
+    """Hidden state at each step after seeing Vicon history up to that step."""
+    device = module_device(model)
+    hidden = model.initial_hidden(1, torch.zeros(1, 1, device=device))
+    hiddens = []
+    position = torch.as_tensor(flight.position, device=device)
+    rotation = torch.as_tensor(flight.rotation, device=device)
+    velocity = torch.as_tensor(flight.velocity_world, device=device)
+    omega = torch.as_tensor(flight.omega_body, device=device)
+    pwm = torch.as_tensor(flight.pwm, device=device)
+    voltage = torch.as_tensor(flight.voltage, device=device)
+    if voltage_value is not None:
+        voltage = torch.full_like(voltage, float(voltage_value))
+    stateless = hidden.numel() == 0
+    for start in range(flight.n_steps):
+        hiddens.append(hidden if stateless else hidden.detach())
+        if stateless:
+            continue
+        features = _features(
+            model,
+            position[start : start + 1],
+            rotation[start : start + 1],
+            velocity[start : start + 1],
+            omega[start : start + 1],
+            pwm[start : start + 1],
+            voltage[start : start + 1],
+        )
+        hidden = _recurrent_step(model, features, hidden)
+    return hiddens
 
 
 def benchmark_mae(
@@ -18,8 +70,13 @@ def benchmark_mae(
     start_stride: int = 1,
     start_offset: int = 0,
     voltage_value: float | None = None,
+    warm_start: bool = False,
 ) -> dict[str, np.ndarray]:
-    """Mean vector-norm error at every horizon, using every valid window."""
+    """Mean vector-norm error at every horizon, using every valid window.
+
+    ``warm_start`` teacher-forces the recurrent hidden state on Vicon up to
+    each window seed. The open-loop rollout itself is unchanged.
+    """
     if start_stride < 1:
         raise ValueError("start_stride must be positive")
     starts = [
@@ -41,13 +98,20 @@ def benchmark_mae(
     seen = 0
     was_training = model.training
     model.eval()
+    warmed: dict[int, list[torch.Tensor]] = {}
     try:
         with torch.no_grad():
+            if warm_start:
+                for flight_index, flight in enumerate(flights):
+                    warmed[flight_index] = teacher_forced_hiddens(
+                        model, flight, voltage_value=voltage_value
+                    )
             for offset in range(0, len(starts), batch_size):
                 batch = starts[offset : offset + batch_size]
                 pwm, voltage, dt, position, rotation, velocity, omega = (
                     [], [], [], [], [], [], []
                 )
+                hidden_batch = []
                 for flight_index, start in batch:
                     flight = flights[flight_index]
                     stop = start + horizon
@@ -58,6 +122,8 @@ def benchmark_mae(
                     rotation.append(flight.rotation[start : stop + 1])
                     velocity.append(flight.velocity_world[start : stop + 1])
                     omega.append(flight.omega_body[start : stop + 1])
+                    if warm_start:
+                        hidden_batch.append(warmed[flight_index][start])
                 pwm_t = torch.as_tensor(np.stack(pwm), device=device)
                 voltage_t = torch.as_tensor(np.stack(voltage), device=device)
                 if voltage_value is not None:
@@ -67,6 +133,9 @@ def benchmark_mae(
                 rotation_t = torch.as_tensor(np.stack(rotation), device=device)
                 velocity_t = torch.as_tensor(np.stack(velocity), device=device)
                 omega_t = torch.as_tensor(np.stack(omega), device=device)
+                hidden = (
+                    torch.cat(hidden_batch, dim=0) if hidden_batch else None
+                )
                 position_hat, rotation_hat, velocity_hat, omega_hat = _integrate(
                     model,
                     pwm_t,
@@ -76,6 +145,7 @@ def benchmark_mae(
                     velocity_t[:, 0],
                     omega_t[:, 0],
                     voltage_t,
+                    hidden=hidden,
                 )
                 relative = torch.matmul(rotation_t[:, 1:].transpose(-1, -2), rotation_hat)
                 errors = {

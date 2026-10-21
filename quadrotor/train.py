@@ -84,6 +84,8 @@ def _features(
             if voltage is None:
                 raise ValueError("voltage-aware model requires battery voltage")
             features = torch.cat((features, voltage.unsqueeze(-1)), dim=-1)
+        if getattr(model, "reads_height", False):
+            features = torch.cat((features, position[..., 2:3]), dim=-1)
         return features
     velocity_body = torch.bmm(rotation.transpose(1, 2), velocity_world.unsqueeze(-1)).squeeze(-1)
     up_world = rotation.new_tensor((0.0, 0.0, 1.0)).expand(rotation.shape[0], 3)
@@ -95,6 +97,8 @@ def _features(
         if voltage is None:
             raise ValueError("voltage-aware model requires battery voltage")
         features = torch.cat((features, voltage.unsqueeze(-1)), dim=-1)
+    if getattr(model, "reads_height", False):
+        features = torch.cat((features, position[..., 2:3]), dim=-1)
     return features
 
 
@@ -143,10 +147,12 @@ def _integrate(
     velocity_world: torch.Tensor,
     omega_body: torch.Tensor,
     voltage: torch.Tensor | None = None,
+    hidden: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Roll the complete predicted state through the motor sequence."""
     positions, rotations, velocities, omegas = [], [], [], []
-    hidden = model.initial_hidden(pwm.shape[0], pwm)
+    if hidden is None:
+        hidden = model.initial_hidden(pwm.shape[0], pwm)
     advance = getattr(model, "advance", None)
     for index in range(pwm.shape[1]):
         if callable(advance):
@@ -192,6 +198,7 @@ def _batch_mse(
     horizon: int,
     weights: torch.Tensor,
     scales: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    hidden_cache: list[list[torch.Tensor]] | None = None,
 ) -> torch.Tensor:
     pwm = []
     voltage = []
@@ -220,6 +227,12 @@ def _batch_mse(
     rotation_t = torch.as_tensor(np.stack(rotation), device=device)
     velocity_t = torch.as_tensor(np.stack(velocity), device=device)
     omega_t = torch.as_tensor(np.stack(omega), device=device)
+    hidden = None
+    if hidden_cache is not None:
+        hidden = torch.cat(
+            [hidden_cache[index][start].to(device) for index, start in pairs],
+            dim=0,
+        )
     position_hat, rotation_hat, velocity_hat, omega_hat = _integrate(
         model,
         pwm_t,
@@ -229,6 +242,7 @@ def _batch_mse(
         velocity_t[:, 0],
         omega_t[:, 0],
         voltage_t,
+        hidden=hidden,
     )
     relative = torch.matmul(rotation_t[:, 1:].transpose(-1, -2), rotation_hat)
     errors = (
@@ -261,13 +275,14 @@ def _mean_mse(
     batch_size: int,
     weights: torch.Tensor,
     scales: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+    hidden_cache: list[list[torch.Tensor]] | None = None,
 ) -> torch.Tensor:
     total = torch.zeros(())
     seen = 0
     for start in range(0, len(pairs), batch_size):
         chunk = pairs[start : start + batch_size]
         total = total + _batch_mse(
-            model, flights, chunk, horizon, weights, scales
+            model, flights, chunk, horizon, weights, scales, hidden_cache
         ).detach() * len(chunk)
         seen += len(chunk)
     return total / seen
@@ -313,6 +328,11 @@ def _input_rows(model: torch.nn.Module, flights: list[PreparedFlight]) -> np.nda
                             if getattr(model, "reads_voltage", False)
                             else ()
                         ),
+                        *(
+                            (flight.position[:-1, 2:3],)
+                            if getattr(model, "reads_height", False)
+                            else ()
+                        ),
                     ),
                     axis=1,
                 )
@@ -340,6 +360,11 @@ def _input_rows(model: torch.nn.Module, flights: list[PreparedFlight]) -> np.nda
                             if getattr(model, "reads_voltage", False)
                             else ()
                         ),
+                        *(
+                            (flight.position[:-1, 2:3],)
+                            if getattr(model, "reads_height", False)
+                            else ()
+                        ),
                     ),
                     axis=1,
                 )
@@ -354,7 +379,15 @@ def _configure_input_normalization(
     rows = _input_rows(model, flights)
     center = rows.mean(axis=0)
     scale = rows.std(axis=0)
-    if getattr(model, "mirror", False):
+    if getattr(model, "longitudinal_mirror", False):
+        # Left-right odd channels only. Do not share front-back scales.
+        center[1] = 0.0
+        center[4] = 0.0
+        center[6] = 0.0
+        center[8] = 0.0
+        center[9:13] = float(np.mean(rows[:, 9:13]))
+        scale[9:13] = float(np.std(rows[:, 9:13]))
+    elif getattr(model, "mirror", False):
         # Every sign-changing channel is centered at zero. Shared horizontal
         # scales preserve both mirrors and a possible future 90-degree rotation.
         center[0:2] = 0.0
@@ -387,16 +420,20 @@ def train_open_loop(
     stride: int = 1,
     horizon: int = HORIZON_STEPS,
     horizon_weight: float = 0.0,
+    omega_end_weight: float = 1.0,
     score_full_test: bool = False,
     name: str = "quadrotor",
     extra_metrics: Callable[[torch.nn.Module, list[PreparedFlight]], dict[str, float]]
     | None = None,
+    warm_start: bool = False,
 ) -> TrainResult:
     """Fit open-loop windows and restore the best validation path.
 
     The checkpoint is the standardized full-state MSE on the multisine
-    validation tails. ``horizon_weight=0`` gives every rollout step equal
-    weight. Category B is never used to choose the epoch.
+    validation tails.     ``horizon_weight=0`` gives every rollout step equal
+    weight. ``omega_end_weight`` ramps the ω term from 1 to that value
+    along the window; 1 leaves the official loss unchanged. Category B
+    is never used to choose the epoch.
     """
     if epochs < 0:
         raise ValueError(f"epochs must be non-negative, got {epochs}")
@@ -408,6 +445,8 @@ def train_open_loop(
         raise ValueError(f"rollout_every must be positive, got {rollout_every}")
     if horizon < 50:
         raise ValueError(f"horizon must be at least 50 steps to report h=10 and h=50, got {horizon}")
+    if omega_end_weight <= 0:
+        raise ValueError(f"omega_end_weight must be positive, got {omega_end_weight}")
     probe = torch.zeros(
         1, model.input_center.numel(), device=module_device(model)
     )
@@ -419,7 +458,9 @@ def train_open_loop(
         f"{name:10s}  {horizon} steps  stride {stride}  "
         f"train {len(train_pairs)}  val {len(val_pairs)}  "
         f"test flights {len(test_flights)}  batch {batch_size}  "
-        f"weight {'uniform' if horizon_weight == 0 else f'exp(-{horizon_weight:g} h)'}",
+        f"weight {'uniform' if horizon_weight == 0 else f'exp(-{horizon_weight:g} h)'}  "
+        f"omega {'flat' if omega_end_weight == 1 else f'ramp 1→{omega_end_weight:g}'}  "
+        f"gru {'warm' if warm_start else 'cold'}",
         flush=True,
     )
 
@@ -427,8 +468,14 @@ def train_open_loop(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(epochs, 1))
     device = module_device(model)
-    weights = torch.exp(-horizon_weight * torch.arange(horizon, device=device))
-    weights = (weights / weights.mean()).view(1, horizon, 1)
+    time_weight = torch.exp(-horizon_weight * torch.arange(horizon, device=device))
+    time_weight = (time_weight / time_weight.mean()).view(1, horizon, 1)
+    channel = torch.ones(1, horizon, 4, device=device)
+    if omega_end_weight != 1.0:
+        # Late steps: pose is H² and eats α. Ramp ω so the far rate stays loud.
+        ramp = torch.arange(1, horizon + 1, device=device, dtype=torch.float32) / horizon
+        channel[0, :, 3] = 1.0 + (float(omega_end_weight) - 1.0) * ramp
+    weights = time_weight * channel.repeat_interleave(3, dim=-1)
     scales = _state_scales(train_flights, device)
     history: list[dict] = []
     best_error = float("inf")
@@ -436,12 +483,29 @@ def train_open_loop(
     best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
     order = torch.arange(len(train_pairs))
 
+    def _hidden_cache(flights: list[PreparedFlight]) -> list[list[torch.Tensor]] | None:
+        if not warm_start:
+            return None
+        from quadrotor.evaluate import teacher_forced_hiddens
+
+        model.eval()
+        with torch.no_grad():
+            return [teacher_forced_hiddens(model, flight) for flight in flights]
+
     for epoch in range(epochs + 1):
+        train_cache = _hidden_cache(train_flights)
         if epoch == 0:
             model.eval()
             with torch.no_grad():
                 loss = _mean_mse(
-                    model, train_flights, train_pairs, horizon, batch_size, weights, scales
+                    model,
+                    train_flights,
+                    train_pairs,
+                    horizon,
+                    batch_size,
+                    weights,
+                    scales,
+                    train_cache,
                 )
         else:
             model.train()
@@ -451,7 +515,13 @@ def train_open_loop(
             for start in range(0, len(order), batch_size):
                 chosen = [train_pairs[int(i)] for i in order[start : start + batch_size]]
                 batch_loss = _batch_mse(
-                    model, train_flights, chosen, horizon, weights, scales
+                    model,
+                    train_flights,
+                    chosen,
+                    horizon,
+                    weights,
+                    scales,
+                    train_cache,
                 )
                 optimizer.zero_grad(set_to_none=True)
                 batch_loss.backward()
@@ -462,10 +532,18 @@ def train_open_loop(
             loss = total / seen
             scheduler.step()
 
+        val_cache = _hidden_cache(val_flights)
         with torch.no_grad():
             model.eval()
             val_loss = _mean_mse(
-                model, val_flights, val_pairs, horizon, batch_size, weights, scales
+                model,
+                val_flights,
+                val_pairs,
+                horizon,
+                batch_size,
+                weights,
+                scales,
+                val_cache,
             )
         row = {
             "epoch": epoch,
@@ -488,7 +566,11 @@ def train_open_loop(
             from quadrotor.evaluate import benchmark_mae
 
             validation_mae = benchmark_mae(
-                model, val_flights, horizon=horizon, batch_size=batch_size
+                model,
+                val_flights,
+                horizon=horizon,
+                batch_size=batch_size,
+                warm_start=warm_start,
             )
             for state, values in validation_mae.items():
                 row[f"val_{state}_mae_h10"] = float(values[9])

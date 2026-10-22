@@ -1,9 +1,8 @@
 """NeuroBEM processed-data loader for recurrent state rollouts.
 
-The source data are 400 Hz. We retain every fourth sample so a 50-step window
-is the same 0.5 seconds used by the nano-drone benchmark. Motor columns are
-reordered into front-right, back-right, back-left, front-left, matching the
-Crazyflie-X convention used by the symmetry implementation.
+Native 400 Hz. A 200-step window is 0.50 s. Motor columns are reordered into
+front-right, back-right, back-left, front-left, matching the Crazyflie-X
+convention used by the symmetry implementation.
 """
 
 from __future__ import annotations
@@ -18,7 +17,9 @@ from quadrotor.geometry import quat_to_matrix
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO_ROOT / "data" / "neurobem"
-DOWNSAMPLE = 4
+RATE_HZ = 400
+HORIZON_STEPS = 200
+DOWNSAMPLE = 1
 
 
 def _segment_id(path: Path) -> str:

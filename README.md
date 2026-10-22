@@ -5,8 +5,8 @@ Supervised learning of raw robot dynamics. The network predicts the observed ste
 ## Layout
 
 - `src/learned_dynamics`: MLP and the full-batch trainer. The saved epoch is the one with the lowest held-out open-loop position error.
-- `unicycle`: Robotarium ground robots. Reads the existing logs in `../robotarium-capstone-data` and does not copy them.
-- `quadrotor`: Crazyflie dynamics. Each benchmark is its own folder: `quadrotor/idsia` (Busetto et al.), `quadrotor/nanobench`, `quadrotor/neurobem`. Data stay under gitignored `data/`.
+- `unicycle`: Robotarium ground robots. Notebooks in this folder; CLI trainers in `unicycle/scripts/`.
+- `quadrotor`: Crazyflie dynamics. Each benchmark is its own folder: `quadrotor/idsia` (Busetto et al.), `quadrotor/nanobench`, `quadrotor/neurobem`. Experiment CLIs live in `quadrotor/scripts/`. Data stay under gitignored `data/`.
 
 ## Unicycle
 
@@ -18,13 +18,7 @@ That label already contains the wheel motion: its forward part lines up with `v�
 
 ## Quadrotor
 
-The quadrotor fit uses the IDSIA benchmark's official 50-step protocol. Square, Random, and Chirp runs 1–3 train the models, run 4 validates them, and all Melon flights are test-only. Every window is seeded once from motion capture, then a GRU predicts body linear and angular acceleration from its rolled state and measured motor-speed history. Velocity and angular velocity are integrated from acceleration; position and SO(3) attitude are integrated from those velocities. No logged state is injected after the seed. Input normalization is fit on the training flights only.
-
-- `absolute`: predicted world position, velocity, SO(3) rotation vector, body angular velocity, and four motor commands. In particular, xyz is the model's rolled-forward xyz, not another logged pose.
-- `canonical`: body gravity direction, body velocity, body angular velocity, and the motors. It drops absolute position and yaw without using Euler angles.
-- `symmetric`: the same canonical state, averaged over the left-right and front-back mirrors of the Crazyflie X layout.
-
-Every network outputs only body-frame linear and angular acceleration. The physically coherent integrator determines all other state changes. The checkpoint is the lowest validation full-state MSE under uniform supervision across the complete 0.5-second horizon.
+The IDSIA leftover is a hist-10 64-64 MLP on the stacked quotient $(g^{\mathrm{body}}, v^{\mathrm{body}}, \omega, \Omega)$, orbit-averaged over both Crazyflie mirrors. Square / Random / Chirp runs 1–3 train, run 4 validates, Melon tests. Each window is seeded from motion capture, then the net predicts body $(a, \alpha)$ and the SE(3) integrator rolls pose. No GRU. Physics and physics+residual stay as the paper baselines.
 
 ## Run
 
@@ -34,6 +28,6 @@ From this directory, in an environment with PyTorch:
 python quadrotor/fetch_idsia.py
 ```
 
-Open `unicycle/learn_dynamics.ipynb` or `quadrotor/learn_dynamics.ipynb`. The model classes sit in one cell. Inputs and outputs stay in physical units. Both notebooks score a fit by held-out open-loop position error.
+Open `unicycle/dynamics.ipynb` or `quadrotor/idsia/idsia.ipynb`. Trainers are `unicycle/scripts/` and `quadrotor/scripts/`.
 
 The benchmark is from Busetto et al., *Control Engineering Practice* 172 (2026), 106871.

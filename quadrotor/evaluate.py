@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from quadrotor.canonical import HORIZON_STEPS, PreparedFlight
-from quadrotor.train import _features, _integrate, _so3_log, module_device
+from quadrotor.train import _features, _integrate, _so3_log, module_device, prime_hidden
 
 
 def _recurrent_step(
@@ -71,11 +71,13 @@ def benchmark_mae(
     start_offset: int = 0,
     voltage_value: float | None = None,
     warm_start: bool = False,
+    warm_steps: int = 0,
 ) -> dict[str, np.ndarray]:
     """Mean vector-norm error at every horizon, using every valid window.
 
-    ``warm_start`` teacher-forces the recurrent hidden state on Vicon up to
-    each window seed. The open-loop rollout itself is unchanged.
+    ``warm_steps`` teacher-forces that many Vicon frames before the seed
+    (NeuroBEM: 20). ``warm_start`` walks the whole flight; do not use that
+    on 400 Hz logs.
     """
     if start_stride < 1:
         raise ValueError("start_stride must be positive")
@@ -101,7 +103,7 @@ def benchmark_mae(
     warmed: dict[int, list[torch.Tensor]] = {}
     try:
         with torch.no_grad():
-            if warm_start:
+            if warm_start and warm_steps <= 0:
                 for flight_index, flight in enumerate(flights):
                     warmed[flight_index] = teacher_forced_hiddens(
                         model, flight, voltage_value=voltage_value
@@ -122,7 +124,7 @@ def benchmark_mae(
                     rotation.append(flight.rotation[start : stop + 1])
                     velocity.append(flight.velocity_world[start : stop + 1])
                     omega.append(flight.omega_body[start : stop + 1])
-                    if warm_start:
+                    if warm_start and warm_steps <= 0:
                         hidden_batch.append(warmed[flight_index][start])
                 pwm_t = torch.as_tensor(np.stack(pwm), device=device)
                 voltage_t = torch.as_tensor(np.stack(voltage), device=device)
@@ -136,6 +138,10 @@ def benchmark_mae(
                 hidden = (
                     torch.cat(hidden_batch, dim=0) if hidden_batch else None
                 )
+                if warm_steps > 0:
+                    hidden = prime_hidden(
+                        model, flights, batch, warm_steps, voltage_value=voltage_value
+                    )
                 position_hat, rotation_hat, velocity_hat, omega_hat = _integrate(
                     model,
                     pwm_t,

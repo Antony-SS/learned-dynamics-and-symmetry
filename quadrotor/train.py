@@ -191,6 +191,58 @@ def _integrate(
     )
 
 
+def prime_hidden(
+    model: torch.nn.Module,
+    flights: list[PreparedFlight],
+    pairs: list[tuple[int, int]],
+    warm_steps: int,
+    voltage_value: float | None = None,
+) -> torch.Tensor | None:
+    """Teacher-force ``warm_steps`` Vicon frames ending at each window seed.
+
+    This is the NeuroBEM-style prime (20 samples = 50 ms at 400 Hz), not a
+    walk over the whole flight.
+    """
+    if warm_steps <= 0:
+        return None
+    device = module_device(model)
+    reference = torch.zeros(len(pairs), 1, device=device)
+    hidden = model.initial_hidden(len(pairs), reference)
+    if hidden.numel() == 0:
+        return hidden
+    for offset in range(warm_steps):
+        position, rotation, velocity, omega, pwm, voltage = [], [], [], [], [], []
+        for index, start in pairs:
+            flight = flights[index]
+            step = min(max(0, start - warm_steps + offset), flight.n_steps - 1)
+            position.append(flight.position[step])
+            rotation.append(flight.rotation[step])
+            velocity.append(flight.velocity_world[step])
+            omega.append(flight.omega_body[step])
+            pwm.append(flight.pwm[step])
+            voltage.append(flight.voltage[step])
+        voltage_t = torch.as_tensor(np.stack(voltage), device=device)
+        if voltage_value is not None:
+            voltage_t = torch.full_like(voltage_t, float(voltage_value))
+        features = _features(
+            model,
+            torch.as_tensor(np.stack(position), device=device),
+            torch.as_tensor(np.stack(rotation), device=device),
+            torch.as_tensor(np.stack(velocity), device=device),
+            torch.as_tensor(np.stack(omega), device=device),
+            torch.as_tensor(np.stack(pwm), device=device),
+            voltage_t,
+        )
+        step_fn = getattr(model, "step", None)
+        if callable(step_fn):
+            _acceleration, hidden = step_fn(features, hidden)
+        else:
+            neural = getattr(model, "neural", None)
+            if neural is not None and callable(getattr(neural, "step", None)):
+                _acceleration, hidden = neural.step(features, hidden)
+    return hidden
+
+
 def _batch_mse(
     model: torch.nn.Module,
     flights: list[PreparedFlight],
@@ -199,6 +251,7 @@ def _batch_mse(
     weights: torch.Tensor,
     scales: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     hidden_cache: list[list[torch.Tensor]] | None = None,
+    warm_steps: int = 0,
 ) -> torch.Tensor:
     pwm = []
     voltage = []
@@ -233,6 +286,8 @@ def _batch_mse(
             [hidden_cache[index][start].to(device) for index, start in pairs],
             dim=0,
         )
+    elif warm_steps > 0:
+        hidden = prime_hidden(model, flights, pairs, warm_steps)
     position_hat, rotation_hat, velocity_hat, omega_hat = _integrate(
         model,
         pwm_t,
@@ -276,15 +331,18 @@ def _mean_mse(
     weights: torch.Tensor,
     scales: tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
     hidden_cache: list[list[torch.Tensor]] | None = None,
+    warm_steps: int = 0,
 ) -> torch.Tensor:
     total = torch.zeros(())
     seen = 0
     for start in range(0, len(pairs), batch_size):
         chunk = pairs[start : start + batch_size]
         total = total + _batch_mse(
-            model, flights, chunk, horizon, weights, scales, hidden_cache
+            model, flights, chunk, horizon, weights, scales, hidden_cache, warm_steps
         ).detach() * len(chunk)
         seen += len(chunk)
+        if start > 0 and start % (batch_size * 20) == 0:
+            print(f"           scored {seen}/{len(pairs)} windows", flush=True)
     return total / seen
 
 
@@ -426,6 +484,7 @@ def train_open_loop(
     extra_metrics: Callable[[torch.nn.Module, list[PreparedFlight]], dict[str, float]]
     | None = None,
     warm_start: bool = False,
+    warm_steps: int = 0,
 ) -> TrainResult:
     """Fit open-loop windows and restore the best validation path.
 
@@ -460,7 +519,7 @@ def train_open_loop(
         f"test flights {len(test_flights)}  batch {batch_size}  "
         f"weight {'uniform' if horizon_weight == 0 else f'exp(-{horizon_weight:g} h)'}  "
         f"omega {'flat' if omega_end_weight == 1 else f'ramp 1→{omega_end_weight:g}'}  "
-        f"gru {'warm' if warm_start else 'cold'}",
+        f"gru {'warm ' + str(warm_steps) + ' steps' if warm_steps > 0 else ('warm' if warm_start else 'cold')}",
         flush=True,
     )
 
@@ -484,15 +543,17 @@ def train_open_loop(
     order = torch.arange(len(train_pairs))
 
     def _hidden_cache(flights: list[PreparedFlight]) -> list[list[torch.Tensor]] | None:
-        if not warm_start:
+        if warm_steps > 0 or not warm_start:
             return None
         from quadrotor.evaluate import teacher_forced_hiddens
 
+        print(f"{name:10s}  caching full-flight warm hiddens ({len(flights)} flights)...", flush=True)
         model.eval()
         with torch.no_grad():
             return [teacher_forced_hiddens(model, flight) for flight in flights]
 
     for epoch in range(epochs + 1):
+        print(f"{name:10s}  epoch {epoch:03d} starting", flush=True)
         train_cache = _hidden_cache(train_flights)
         if epoch == 0:
             model.eval()
@@ -506,6 +567,7 @@ def train_open_loop(
                     weights,
                     scales,
                     train_cache,
+                    warm_steps,
                 )
         else:
             model.train()
@@ -522,6 +584,7 @@ def train_open_loop(
                     weights,
                     scales,
                     train_cache,
+                    warm_steps,
                 )
                 optimizer.zero_grad(set_to_none=True)
                 batch_loss.backward()
@@ -544,6 +607,7 @@ def train_open_loop(
                 weights,
                 scales,
                 val_cache,
+                warm_steps,
             )
         row = {
             "epoch": epoch,
@@ -571,6 +635,7 @@ def train_open_loop(
                 horizon=horizon,
                 batch_size=batch_size,
                 warm_start=warm_start,
+                warm_steps=warm_steps,
             )
             for state, values in validation_mae.items():
                 row[f"val_{state}_mae_h10"] = float(values[9])

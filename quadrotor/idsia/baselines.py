@@ -547,6 +547,7 @@ def train_phys_res(
     *,
     epochs: int = 20,
     horizon: int = HORIZON_STEPS,
+    stride: int | None = None,
     batch_size: int = 256,
     device: str | torch.device = "cpu",
 ) -> PhysResQuadModel:
@@ -561,8 +562,8 @@ def train_phys_res(
         model.u_mean.copy_(u_mean)
         model.u_scale.copy_(u_scale)
     model.to(device)
-    train_x, train_u, train_y = _windows(train_flights, horizon)
-    val_x, val_u, val_y = _windows(val_flights, horizon)
+    train_x, train_u, train_y = _windows(train_flights, horizon, stride=stride)
+    val_x, val_u, val_y = _windows(val_flights, horizon, stride=stride)
 
     def _normalize(x, u, y):
         return (
@@ -576,6 +577,7 @@ def train_phys_res(
     optimizer = torch.optim.Adam(model.neural.parameters(), lr=1e-4)
     best = None
     best_loss = float("inf")
+    curve = []
     for epoch in range(epochs):
         model.train()
         order = torch.randperm(len(train_x))
@@ -588,7 +590,7 @@ def train_phys_res(
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            train_loss += float(loss) * len(index)
+            train_loss += float(loss.detach()) * len(index)
             seen += len(index)
         model.eval()
         with torch.no_grad():
@@ -600,9 +602,11 @@ def train_phys_res(
                 val_loss += float((pred - val_y[start:stop].to(device)).pow(2).mean()) * (stop - start)
                 counted += stop - start
         val_loss /= max(counted, 1)
+        train_mean = train_loss / max(seen, 1)
+        curve.append({"epoch": epoch + 1, "train": train_mean, "val": val_loss})
         print(
             f"phys+res  epoch {epoch + 1}/{epochs}  "
-            f"train {train_loss / max(seen, 1):.6f}  val {val_loss:.6f}",
+            f"train {train_mean:.6f}  val {val_loss:.6f}",
             flush=True,
         )
         if val_loss < best_loss:
@@ -610,6 +614,7 @@ def train_phys_res(
             best = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
     if best is not None:
         model.load_state_dict(best)
+    model.train_curve = curve
     model.eval()
     return model
 

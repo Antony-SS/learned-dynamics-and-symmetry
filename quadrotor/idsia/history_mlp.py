@@ -26,6 +26,33 @@ EPOCHS = 20
 HIDDEN = 64
 BATCH = 256
 STRIDE = 1
+TRAIN_STRIDE = 5
+
+# Identity, left-right, front-back, both. PWM permutation is separate.
+_ORBIT_GV = (
+    (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+    (1.0, -1.0, 1.0, 1.0, -1.0, 1.0),
+    (-1.0, 1.0, 1.0, -1.0, 1.0, 1.0),
+    (-1.0, -1.0, 1.0, -1.0, -1.0, 1.0),
+)
+_ORBIT_W = (
+    (1.0, 1.0, 1.0),
+    (-1.0, 1.0, -1.0),
+    (1.0, -1.0, -1.0),
+    (-1.0, -1.0, 1.0),
+)
+_ORBIT_PWM = (
+    (0, 1, 2, 3),
+    (3, 2, 1, 0),
+    (1, 0, 3, 2),
+    (2, 3, 0, 1),
+)
+_ORBIT_ACC = (
+    (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+    (1.0, -1.0, 1.0, -1.0, 1.0, -1.0),
+    (-1.0, 1.0, 1.0, 1.0, -1.0, -1.0),
+    (-1.0, -1.0, 1.0, -1.0, -1.0, 1.0),
+)
 
 
 class HistoryQuotientMLP(torch.nn.Module):
@@ -53,6 +80,10 @@ class HistoryQuotientMLP(torch.nn.Module):
         )
         self.register_buffer("x_mean", torch.zeros(13))
         self.register_buffer("x_scale", torch.ones(13))
+        self.register_buffer("orbit_gv", torch.tensor(_ORBIT_GV, dtype=torch.float32))
+        self.register_buffer("orbit_w", torch.tensor(_ORBIT_W, dtype=torch.float32))
+        self.register_buffer("orbit_pwm", torch.tensor(_ORBIT_PWM, dtype=torch.long))
+        self.register_buffer("orbit_acc", torch.tensor(_ORBIT_ACC, dtype=torch.float32))
 
     def set_stats(self, mean: torch.Tensor, scale: torch.Tensor) -> None:
         with torch.no_grad():
@@ -61,28 +92,25 @@ class HistoryQuotientMLP(torch.nn.Module):
 
     def _mirror_stack(self, stacked: torch.Tensor, name: str) -> torch.Tensor:
         slots = stacked.reshape(stacked.shape[0], self.history, 13)
-        return torch.stack(
-            [_mirror_features(slots[:, k], name) for k in range(self.history)],
-            dim=1,
-        ).reshape(stacked.shape[0], -1)
+        return _mirror_features(slots, name).reshape(stacked.shape[0], -1)
 
     def _predict(self, stacked: torch.Tensor) -> torch.Tensor:
         if not self.symmetric:
             return self.net(stacked)
         batch = stacked.shape[0]
-        names = (None, "lr", "fb", "both")
+        slots = stacked.reshape(batch, self.history, 13)
+        pwm = slots[..., 9:13]
+        index = self.orbit_pwm.view(4, 1, 1, 4).expand(4, batch, self.history, 4)
         orbit = torch.cat(
-            [
-                stacked if name is None else self._mirror_stack(stacked, name)
-                for name in names
-            ],
-            dim=0,
+            (
+                slots[..., 0:6].unsqueeze(0) * self.orbit_gv.view(4, 1, 1, 6),
+                slots[..., 6:9].unsqueeze(0) * self.orbit_w.view(4, 1, 1, 3),
+                pwm.unsqueeze(0).expand(4, -1, -1, -1).gather(-1, index),
+            ),
+            dim=-1,
         )
-        raw = self.net(orbit).reshape(4, batch, 6)
-        total = raw[0]
-        for index, name in enumerate(names[1:], start=1):
-            total = total + _mirror_acceleration(raw[index], name)
-        return total / 4.0
+        raw = self.net(orbit.reshape(4 * batch, -1)).reshape(4, batch, 6)
+        return (raw * self.orbit_acc.unsqueeze(1)).sum(0) / 4.0
 
     def forward(self, stacked: torch.Tensor) -> torch.Tensor:
         return self._predict(stacked)
@@ -134,11 +162,79 @@ def state_scales(flights):
 
 
 def feat_stats(flights):
-    rows = np.stack([feat_row(f, k) for f in flights for k in range(f.n_steps)])
+    rows = np.concatenate([flight_features(f) for f in flights], axis=0)
     return (
         torch.as_tensor(rows.mean(0), dtype=torch.float32),
         torch.as_tensor(np.clip(rows.std(0), 1e-6, None), dtype=torch.float32),
     )
+
+
+def flight_features(flight) -> np.ndarray:
+    n = flight.n_steps
+    rotation = flight.rotation[:n]
+    up = np.array((0.0, 0.0, 1.0), np.float32)
+    gravity = np.einsum("nji,j->ni", rotation, up)
+    velocity = np.einsum("nji,nj->ni", rotation, flight.velocity_world[:n])
+    return np.concatenate(
+        (gravity, velocity, flight.omega_body[:n], flight.pwm), axis=1
+    ).astype(np.float32)
+
+
+def cache_flights(flights, device: torch.device) -> list[dict[str, torch.Tensor]]:
+    cached = []
+    for flight in flights:
+        feat = flight_features(flight)
+        cached.append(
+            {
+                "feat": torch.as_tensor(feat, device=device),
+                "position": torch.as_tensor(flight.position, device=device),
+                "rotation": torch.as_tensor(flight.rotation, device=device),
+                "velocity": torch.as_tensor(flight.velocity_world, device=device),
+                "omega": torch.as_tensor(flight.omega_body, device=device),
+                "pwm": torch.as_tensor(flight.pwm, device=device),
+                "dt": torch.as_tensor(flight.dt, device=device),
+            }
+        )
+    return cached
+
+
+def pack_windows(
+    cached: list[dict[str, torch.Tensor]],
+    pairs: list[tuple[int, int]],
+    history: int,
+    horizon: int,
+) -> dict[str, torch.Tensor]:
+    p0, r0, v0, w0, pwm, dt = [], [], [], [], [], []
+    pt, rt, vt, wt, hist = [], [], [], [], []
+    for fi, s in pairs:
+        f = cached[fi]
+        n_feat = f["feat"].shape[0]
+        idx = torch.arange(s - history + 1, s + 1, device=f["feat"].device)
+        hist.append(f["feat"][idx.clamp(0, n_feat - 1)])
+        stop = s + horizon
+        p0.append(f["position"][s])
+        r0.append(f["rotation"][s])
+        v0.append(f["velocity"][s])
+        w0.append(f["omega"][s])
+        pwm.append(f["pwm"][s:stop])
+        dt.append(f["dt"][s:stop])
+        pt.append(f["position"][s + 1 : stop + 1])
+        rt.append(f["rotation"][s + 1 : stop + 1])
+        vt.append(f["velocity"][s + 1 : stop + 1])
+        wt.append(f["omega"][s + 1 : stop + 1])
+    return {
+        "p": torch.stack(p0),
+        "r": torch.stack(r0),
+        "v": torch.stack(v0),
+        "w": torch.stack(w0),
+        "pwm": torch.stack(pwm),
+        "dt": torch.stack(dt),
+        "pt": torch.stack(pt),
+        "rt": torch.stack(rt),
+        "vt": torch.stack(vt),
+        "wt": torch.stack(wt),
+        "hist": torch.stack(hist),
+    }
 
 
 def warm(flights, batch, history: int, device):
@@ -195,6 +291,44 @@ def _batch_states(flights, batch, horizon: int, device):
     )
 
 
+def _packed_mean_loss(model, packed, scales, index: torch.Tensor | None = None):
+    sl = slice(None) if index is None else index
+    pred_p, pred_r, pred_v, pred_w = roll(
+        model,
+        packed["p"][sl],
+        packed["r"][sl],
+        packed["v"][sl],
+        packed["w"][sl],
+        packed["pwm"][sl],
+        packed["dt"][sl],
+        packed["hist"][sl],
+    )
+    rel = torch.matmul(packed["rt"][sl].transpose(-1, -2), pred_r)
+    sp, sr, sv, sw = scales
+    return torch.stack(
+        (
+            (pred_p - packed["pt"][sl]).div(sp).pow(2).mean(),
+            _so3_log(rel.reshape(-1, 3, 3)).div(sr).pow(2).mean(),
+            (pred_v - packed["vt"][sl]).div(sv).pow(2).mean(),
+            (pred_w - packed["wt"][sl]).div(sw).pow(2).mean(),
+        )
+    )
+
+
+@torch.no_grad()
+def _packed_split_loss(model, packed, scales) -> np.ndarray:
+    model.eval()
+    parts = np.zeros(4)
+    seen = 0
+    n = packed["p"].shape[0]
+    for start in range(0, n, BATCH):
+        block = _packed_mean_loss(model, packed, scales, slice(start, start + BATCH))
+        count = min(BATCH, n - start)
+        parts += block.detach().cpu().numpy() * count
+        seen += count
+    return parts / max(seen, 1)
+
+
 def train_history(
     train,
     *,
@@ -203,52 +337,74 @@ def train_history(
     device: torch.device,
     seed: int = 0,
     tag: str = "",
+    stride: int = TRAIN_STRIDE,
+    val=None,
 ) -> HistoryQuotientMLP:
     torch.manual_seed(seed)
     mean, scale = feat_stats(train)
     model = HistoryQuotientMLP(history=history, symmetric=symmetric).to(device)
     model.set_stats(mean.to(device), scale.to(device))
-    pairs = starts(train)
+    pairs = starts(train, stride=stride)
     kind = "Z2×Z2" if symmetric else "quotient-only"
     print(
         f"{tag or f'hist-{history}'}  {kind}  params {n_params(model)}  "
-        f"windows {len(pairs)}  stacked ω  seed {seed}",
+        f"windows {len(pairs)}  train stride {stride}  stacked ω  seed {seed}",
         flush=True,
     )
+    packed = pack_windows(cache_flights(train, device), pairs, history, HORIZON)
+    packed_val = None
+    if val is not None:
+        val_pairs = starts(val, stride=stride)
+        packed_val = pack_windows(cache_flights(val, device), val_pairs, history, HORIZON)
+        print(f"  cached {len(pairs)} train / {len(val_pairs)} val windows on {device}", flush=True)
+    else:
+        print(f"  cached {len(pairs)} windows on {device}", flush=True)
     opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    sp, sr, sv, sw = state_scales(train)
-    for epoch in range(EPOCHS + 1):
-        model.eval() if epoch == 0 else model.train()
-        order = torch.randperm(len(pairs)) if epoch else torch.arange(len(pairs))
+    scales = state_scales(train)
+    n = len(pairs)
+    curve = []
+    for epoch in range(1, EPOCHS + 1):
+        print(f"  {tag or f'h{history}'}  epoch {epoch:02d}  starting  {n} windows", flush=True)
+        model.train()
+        order = torch.randperm(n)
         parts = np.zeros(4)
         seen = 0
-        for start in range(0, len(order), BATCH):
-            batch = [pairs[int(i)] for i in order[start : start + BATCH]]
-            p, r, v, w, pwm, dt, pt, rt, vt, wt = _batch_states(train, batch, HORIZON, device)
-            pred_p, pred_r, pred_v, pred_w = roll(
-                model, p, r, v, w, pwm, dt, warm(train, batch, history, device)
-            )
-            rel = torch.matmul(rt.transpose(-1, -2), pred_r)
-            block = torch.stack(
-                (
-                    (pred_p - pt).div(sp).pow(2).mean(),
-                    _so3_log(rel.reshape(-1, 3, 3)).div(sr).pow(2).mean(),
-                    (pred_v - vt).div(sv).pow(2).mean(),
-                    (pred_w - wt).div(sw).pow(2).mean(),
-                )
-            )
-            if epoch:
-                opt.zero_grad()
-                block.mean().backward()
-                opt.step()
-            parts += block.detach().cpu().numpy() * len(batch)
-            seen += len(batch)
+        for start in range(0, n, BATCH):
+            index = order[start : start + BATCH]
+            block = _packed_mean_loss(model, packed, scales, index)
+            opt.zero_grad()
+            block.mean().backward()
+            opt.step()
+            parts += block.detach().cpu().numpy() * int(index.numel())
+            seen += int(index.numel())
         m = parts / max(seen, 1)
+        row = {
+            "epoch": epoch,
+            "train": float(m.mean()),
+            "train_p": float(m[0]),
+            "train_R": float(m[1]),
+            "train_v": float(m[2]),
+            "train_w": float(m[3]),
+        }
+        if packed_val is not None:
+            vm = _packed_split_loss(model, packed_val, scales)
+            row.update(
+                {
+                    "val": float(vm.mean()),
+                    "val_p": float(vm[0]),
+                    "val_R": float(vm[1]),
+                    "val_v": float(vm[2]),
+                    "val_w": float(vm[3]),
+                }
+            )
+        curve.append(row)
+        extra = f"  val {row['val']:.5f}" if "val" in row else ""
         print(
-            f"  {tag or f'h{history}'}  epoch {epoch:02d}  mean {m.mean():.5f}  "
-            f"p {m[0]:.5f}  R {m[1]:.5f}  v {m[2]:.5f}  w {m[3]:.5f}",
+            f"  {tag or f'h{history}'}  epoch {epoch:02d}  train {m.mean():.5f}  "
+            f"p {m[0]:.5f}  R {m[1]:.5f}  v {m[2]:.5f}  w {m[3]:.5f}{extra}",
             flush=True,
         )
+    model.train_curve = curve
     model.eval()
     return model
 
@@ -260,13 +416,26 @@ def score_history(model, flights, device) -> dict[str, np.ndarray]:
         for fi, flight in enumerate(flights)
         for s in range(0, flight.n_steps - HORIZON + 1)
     ]
+    packed = pack_windows(cache_flights(flights, device), pairs, model.history, HORIZON)
     totals = {k: np.zeros(HORIZON) for k in ("position", "velocity", "rotation", "omega")}
     print(f"  scoring Melon  {len(pairs)} windows  batch {BATCH}", flush=True)
     for offset in range(0, len(pairs), BATCH):
-        batch = pairs[offset : offset + BATCH]
-        p, r, v, w, pwm, dt, pt, rt, vt, wt = _batch_states(flights, batch, HORIZON, device)
+        index = slice(offset, offset + BATCH)
         pred_p, pred_r, pred_v, pred_w = roll(
-            model, p, r, v, w, pwm, dt, warm(flights, batch, model.history, device)
+            model,
+            packed["p"][index],
+            packed["r"][index],
+            packed["v"][index],
+            packed["w"][index],
+            packed["pwm"][index],
+            packed["dt"][index],
+            packed["hist"][index],
+        )
+        pt, rt, vt, wt = (
+            packed["pt"][index],
+            packed["rt"][index],
+            packed["vt"][index],
+            packed["wt"][index],
         )
         rel = torch.matmul(rt.transpose(-1, -2), pred_r)
         totals["position"] += (
@@ -309,6 +478,7 @@ def save_model(model: HistoryQuotientMLP, path: Path) -> None:
             "history": model.history,
             "symmetric": model.symmetric,
             "params": n_params(model),
+            "curve": list(getattr(model, "train_curve", [])),
         },
         path,
     )
@@ -320,7 +490,7 @@ def load_model(path: Path, device: torch.device | str = "cpu") -> HistoryQuotien
         history=int(payload["history"]),
         symmetric=bool(payload.get("symmetric", False)),
     )
-    model.load_state_dict(payload["state"])
+    model.load_state_dict(payload["state"], strict=False)
     model.set_stats(payload["x_mean"], payload["x_scale"])
     return model.to(device).eval()
 

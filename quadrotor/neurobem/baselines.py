@@ -18,8 +18,7 @@ from quadrotor.neurobem.data import DEFAULT_ROOT, DOWNSAMPLE, _flight_id, _segme
 from quadrotor.neurobem.tcn import NeuroBEMTCN
 from quadrotor.train import _apply, _so3_log, module_device
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-CHECKPOINT_DIR = REPO_ROOT / "runs" / "neurobem_tcn_100hz"
+CHECKPOINT_DIR = Path(__file__).resolve().parent / "out" / "tcn_100hz"
 MASS = 0.772
 GRAVITY = 9.80665
 INERTIA = (0.0025, 0.0021, 0.0043)

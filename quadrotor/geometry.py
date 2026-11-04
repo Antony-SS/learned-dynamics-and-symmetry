@@ -1,15 +1,9 @@
-"""SO(3) helpers and the shared kinematics step.
-
-Numpy maps live next to the batched torch versions so IDSIA and NeuroBEM
-do not depend on the leftover GRU trainer.
-"""
+"""SO(3) helpers and the shared kinematics step."""
 
 from __future__ import annotations
 
 import numpy as np
 import torch
-
-from quadrotor.canonical import PreparedFlight
 
 _ANGLE_EPS = 1e-8
 
@@ -70,18 +64,6 @@ def quat_to_matrix(quat_xyzw: np.ndarray) -> np.ndarray:
     matrix[:, 2, 1] = 2.0 * (yz + wx)
     matrix[:, 2, 2] = 1.0 - 2.0 * (xx + yy)
     return matrix
-
-
-def roll_pitch_yaw(rotations: np.ndarray) -> np.ndarray:
-    """ZYX Euler angles in radians from rotation matrices."""
-    rotations = np.asarray(rotations, dtype=float)
-    pitch = np.arctan2(
-        -rotations[:, 2, 0],
-        np.hypot(rotations[:, 2, 1], rotations[:, 2, 2]),
-    )
-    roll = np.arctan2(rotations[:, 2, 1], rotations[:, 2, 2])
-    yaw = np.arctan2(rotations[:, 1, 0], rotations[:, 0, 0])
-    return np.stack((roll, pitch, yaw), axis=1)
 
 
 def project_rotation(rotation: np.ndarray) -> np.ndarray:
@@ -149,25 +131,15 @@ def _so3_log(rotation: torch.Tensor) -> torch.Tensor:
 
 
 def _features(
-    model: torch.nn.Module,
-    position: torch.Tensor,
     rotation: torch.Tensor,
     velocity_world: torch.Tensor,
     omega_body: torch.Tensor,
     motors: torch.Tensor,
 ) -> torch.Tensor:
-    if getattr(model, "reads_pose", False):
-        features = torch.cat((position, velocity_world, _so3_log(rotation), omega_body, motors), dim=-1)
-        if getattr(model, "reads_height", False):
-            features = torch.cat((features, position[..., 2:3]), dim=-1)
-        return features
     velocity_body = torch.bmm(rotation.transpose(1, 2), velocity_world.unsqueeze(-1)).squeeze(-1)
     up_world = rotation.new_tensor((0.0, 0.0, 1.0)).expand(rotation.shape[0], 3)
     gravity_body = torch.bmm(rotation.transpose(1, 2), up_world.unsqueeze(-1)).squeeze(-1)
-    features = torch.cat((gravity_body, velocity_body, omega_body, motors), dim=-1)
-    if getattr(model, "reads_height", False):
-        features = torch.cat((features, position[..., 2:3]), dim=-1)
-    return features
+    return torch.cat((gravity_body, velocity_body, omega_body, motors), dim=-1)
 
 
 def _apply(
@@ -187,21 +159,6 @@ def _apply(
     rotation = torch.bmm(rotation, _so3_exp(rotation_increment))
     omega_body = omega_body + angular_acceleration * dt
     return position, rotation, velocity_world, omega_body
-
-
-def window_starts(flights: list[PreparedFlight], horizon: int, stride: int) -> list[tuple[int, int]]:
-    pairs: list[tuple[int, int]] = []
-    for index, flight in enumerate(flights):
-        last = flight.n_steps - horizon
-        if last < 0:
-            raise ValueError(
-                f"{flight.name} has {flight.n_steps} steps, shorter than a {horizon} step window"
-            )
-        for start in range(0, last + 1, stride):
-            pairs.append((index, start))
-    if not pairs:
-        raise ValueError("no training windows")
-    return pairs
 
 
 def _integrate(
@@ -231,8 +188,6 @@ def _integrate(
             )
         else:
             features = _features(
-                model,
-                position,
                 rotation,
                 velocity_world,
                 omega_body,
@@ -252,45 +207,3 @@ def _integrate(
         torch.stack(velocities, dim=1),
         torch.stack(omegas, dim=1),
     )
-
-
-def prime_hidden(
-    model: torch.nn.Module,
-    flights: list[PreparedFlight],
-    pairs: list[tuple[int, int]],
-    warm_steps: int,
-) -> torch.Tensor | None:
-    """Teacher-force ``warm_steps`` Vicon frames ending at each window seed."""
-    if warm_steps <= 0:
-        return None
-    device = module_device(model)
-    reference = torch.zeros(len(pairs), 1, device=device)
-    hidden = model.initial_hidden(len(pairs), reference)
-    if hidden.numel() == 0:
-        return hidden
-    for offset in range(warm_steps):
-        position, rotation, velocity, omega, motors = [], [], [], [], []
-        for index, start in pairs:
-            flight = flights[index]
-            step = min(max(0, start - warm_steps + offset), flight.n_steps - 1)
-            position.append(flight.position[step])
-            rotation.append(flight.rotation[step])
-            velocity.append(flight.velocity_world[step])
-            omega.append(flight.omega_body[step])
-            motors.append(flight.motors[step])
-        features = _features(
-            model,
-            torch.as_tensor(np.stack(position), device=device),
-            torch.as_tensor(np.stack(rotation), device=device),
-            torch.as_tensor(np.stack(velocity), device=device),
-            torch.as_tensor(np.stack(omega), device=device),
-            torch.as_tensor(np.stack(motors), device=device),
-        )
-        step_fn = getattr(model, "step", None)
-        if callable(step_fn):
-            _acceleration, hidden = step_fn(features, hidden)
-        else:
-            neural = getattr(model, "neural", None)
-            if neural is not None and callable(getattr(neural, "step", None)):
-                _acceleration, hidden = neural.step(features, hidden)
-    return hidden

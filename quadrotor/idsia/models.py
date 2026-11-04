@@ -48,8 +48,7 @@ def _mlp(in_dim: int, hidden: int, n_hidden: int, out_dim: int) -> nn.Sequential
 
 
 def quotient(rotation: torch.Tensor, velocity_world: torch.Tensor, omega: torch.Tensor, motors: torch.Tensor) -> torch.Tensor:
-    dummy = type("M", (), {"reads_pose": False, "reads_height": False})()
-    return _features(dummy, None, rotation, velocity_world, omega, motors)
+    return _features(rotation, velocity_world, omega, motors)
 
 
 class QuadDynamicsNet(nn.Module):
@@ -59,7 +58,6 @@ class QuadDynamicsNet(nn.Module):
     """
 
     reads_pose = False
-    reads_height = False
     family = "quad_dynamics"
 
     def __init__(self, symmetric: bool = True, hidden: int = HIDDEN, n_hidden: int = 2) -> None:

@@ -12,7 +12,6 @@ dist/
 build/
 quadrotor/runs/
 quadrotor/idsia/out/
-quadrotor/neurobem/out/
 *.png
 *.pt
 *.html

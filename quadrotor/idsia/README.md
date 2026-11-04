@@ -1,6 +1,6 @@
 # IDSIA Crazyflie sys-id
 
-Busetto et al., *Control Engineering Practice* 172 (2026). Official split: Square / Random / Chirp runs 1–3 train, run 4 val, Melon test. Fetch with `python quadrotor/fetch_idsia.py`. Shared kinematics are `quadrotor.geometry`; this folder does not use the NeuroBEM GRU trainer.
+Busetto et al., *Control Engineering Practice* 172 (2026). Official split: Square / Random / Chirp runs 1–3 train, run 4 val, Melon test. Fetch with `python quadrotor/fetch_idsia.py`. Shared kinematics are `quadrotor.geometry`.
 
 We train three models with **their recipe** (stride 1, 50-step windows, WeightedMSE λ=0.1, Adam 1e-5→1e-8 cosine T=500, 20 epochs, best val):
 

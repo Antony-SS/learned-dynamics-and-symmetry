@@ -37,7 +37,7 @@ class PreparedFlight:
     rotation: np.ndarray
     velocity_world: np.ndarray
     omega_body: np.ndarray
-    motors: np.ndarray  # IDSIA: rad/s. NeuroBEM: logged motor speeds (RPM).
+    motors: np.ndarray  # rotor speeds, rad/s
     dt: np.ndarray
     attitude: str
 

@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
 
 import quadrotor.neurobem.nyu_decoupled18k as nyu
 from quadrotor.neurobem.data import load_neurobem_prepared
-from quadrotor.train import _so3_log
+from quadrotor.geometry import _so3_log
 
 
 def _phi(r0: torch.Tensor, r1: torch.Tensor) -> torch.Tensor:
@@ -35,7 +35,7 @@ def score(flights) -> dict[str, float]:
     n = 0
     for offset in range(0, len(pairs), nyu.BATCH):
         batch = pairs[offset : offset + nyu.BATCH]
-        _pwm, dt, _p, r, _v, w = nyu.tensors(flights, batch, nyu.EVAL_H, device)
+        _motors, dt, _p, r, _v, w = nyu.tensors(flights, batch, nyu.EVAL_H, device)
         # states are length H+1; intervals length H; dt is length H
         phi_fwd = _phi(r[:, :-1], r[:, 1:])
         w_fwd = phi_fwd / dt.unsqueeze(-1).clamp_min(1e-6)

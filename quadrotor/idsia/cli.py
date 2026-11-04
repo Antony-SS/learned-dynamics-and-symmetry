@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from quadrotor.fit import train_device
+from quadrotor.geometry import train_device
 from quadrotor.idsia.data import load_idsia_prepared
 from quadrotor.idsia.evaluate import eval_model, family_summary
 from quadrotor.idsia.recipe import KEYS

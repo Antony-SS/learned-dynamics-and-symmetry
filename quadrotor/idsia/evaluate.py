@@ -12,7 +12,7 @@ from quadrotor.evaluate import benchmark_mae
 from quadrotor.idsia.models import QuadDynamicsNet, quotient
 from quadrotor.idsia.recipe import BATCH, EVAL, HORIZON, HS, KEYS, eval_dir
 from quadrotor.idsia.train_lib import pack_dynamics, write_json
-from quadrotor.train import _apply, _so3_log, module_device
+from quadrotor.geometry import _apply, _so3_log, module_device
 
 
 def pack_mae(mae: dict[str, np.ndarray]) -> dict[str, list[float]]:
@@ -32,7 +32,7 @@ def _dynamics_mae(model: QuadDynamicsNet, flights, device) -> tuple[dict[str, np
             r = packed["r"][sl]
             v = packed["v"][sl]
             w = packed["w"][sl]
-            pwm = packed["pwm"][sl]
+            motors = packed["motors"][sl]
             dt = packed["dt"][sl]
             buf = packed["hist"][sl].clone()
             y = packed["y"][sl]
@@ -48,7 +48,7 @@ def _dynamics_mae(model: QuadDynamicsNet, flights, device) -> tuple[dict[str, np
                 err["velocity"].append(torch.linalg.vector_norm(v - y[:, k, 3:6], dim=-1))
                 err["omega"].append(torch.linalg.vector_norm(w - y[:, k, 9:12], dim=-1))
                 if k + 1 < HORIZON:
-                    nxt = quotient(r, v, w, pwm[:, k + 1]).unsqueeze(1)
+                    nxt = quotient(r, v, w, motors[:, k + 1]).unsqueeze(1)
                     buf = torch.cat((buf[:, 1:], nxt), dim=1)
             for key in KEYS:
                 stacked = torch.stack(err[key], dim=1)

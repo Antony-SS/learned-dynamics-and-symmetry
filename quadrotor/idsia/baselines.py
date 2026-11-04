@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from quadrotor.canonical import HORIZON_STEPS, PreparedFlight
 from quadrotor.geometry import so3_log_batch
 from quadrotor.idsia.data import DEFAULT_ROOT
-from quadrotor.train import _so3_exp, _so3_log
+from quadrotor.geometry import _so3_exp, _so3_log
 
 DT = 0.01
 PHYS_RES_NAME = "phys+res_random_square_chirp.pt"
@@ -62,14 +62,14 @@ class BaseQuadModel(torch.nn.Module):
         rotation: torch.Tensor,
         velocity_world: torch.Tensor,
         omega_body: torch.Tensor,
-        pwm: torch.Tensor,
+        motors: torch.Tensor,
         dt: torch.Tensor,
         hidden: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         del dt
         so3 = _so3_log(rotation)
         x = torch.cat([position, velocity_world, so3, omega_body], dim=-1)
-        x_next = self.step_real(x, pwm)
+        x_next = self.step_real(x, motors)
         position, velocity_world, so3, omega_body = x_next.split((3, 3, 3, 3), dim=-1)
         return position, _so3_exp(so3), velocity_world, omega_body, hidden
 
@@ -407,7 +407,7 @@ def fit_scalers(
                 axis=1,
             )
         )
-        motors.append(flight.pwm)
+        motors.append(flight.motors)
     x = np.concatenate(states, axis=0)
     u = np.concatenate(motors, axis=0)
     x_scale = np.std(x, axis=0).astype(np.float32)
@@ -431,7 +431,7 @@ def fit_canonical_scalers(
         velocity_body = np.einsum("nji,nj->ni", rotation, flight.velocity_world[:-1])
         rows.append(
             np.concatenate(
-                [gravity_body, velocity_body, flight.omega_body[:-1], flight.pwm],
+                [gravity_body, velocity_body, flight.omega_body[:-1], flight.motors],
                 axis=1,
             )
         )
@@ -460,7 +460,7 @@ def _windows(
         for start in range(0, last, stride):
             stop = start + horizon
             xs.append(state[start])
-            us.append(flight.pwm[start:stop])
+            us.append(flight.motors[start:stop])
             ys.append(state[start + 1 : stop + 1])
     return (
         torch.as_tensor(np.stack(xs), dtype=torch.float32),

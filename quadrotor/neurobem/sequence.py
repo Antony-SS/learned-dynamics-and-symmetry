@@ -1,4 +1,4 @@
-"""Recurrent acceleration networks for the NanoBench rollout.
+"""Recurrent leftover nets (ParityMotorNet / GRU) for NeuroBEM experiments.
 
 The network writes body-frame linear and angular acceleration. Position and
 attitude are never predicted independently: the rollout integrates them from
@@ -28,27 +28,27 @@ def _mirror_features(features: torch.Tensor, name: str) -> torch.Tensor:
     gravity = features[..., 0:3]
     velocity = features[..., 3:6]
     omega = features[..., 6:9]
-    pwm = features[..., 9:13]
+    motors = features[..., 9:13]
     invariant = features[..., 13:]
     if name == "lr":
-        pwm = pwm[..., [3, 2, 1, 0]]
+        motors = motors[..., [3, 2, 1, 0]]
         gravity = gravity * gravity.new_tensor((1.0, -1.0, 1.0))
         velocity = velocity * velocity.new_tensor((1.0, -1.0, 1.0))
         omega = omega * omega.new_tensor((-1.0, 1.0, -1.0))
     elif name == "fb":
-        pwm = pwm[..., [1, 0, 3, 2]]
+        motors = motors[..., [1, 0, 3, 2]]
         gravity = gravity * gravity.new_tensor((-1.0, 1.0, 1.0))
         velocity = velocity * velocity.new_tensor((-1.0, 1.0, 1.0))
         omega = omega * omega.new_tensor((1.0, -1.0, -1.0))
     elif name == "both":
-        pwm = pwm[..., [2, 3, 0, 1]]
+        motors = motors[..., [2, 3, 0, 1]]
         gravity = gravity * gravity.new_tensor((-1.0, -1.0, 1.0))
         velocity = velocity * velocity.new_tensor((-1.0, -1.0, 1.0))
         omega = omega * omega.new_tensor((-1.0, -1.0, 1.0))
     else:
         raise ValueError(f"unknown mirror {name!r}")
     return torch.cat(
-        (gravity, velocity, omega, pwm, invariant),
+        (gravity, velocity, omega, motors, invariant),
         dim=-1,
     )
 
@@ -81,10 +81,10 @@ class MotorNet(torch.nn.Module):
         super().__init__()
         if out_dim != 6:
             raise ValueError(f"expected 6 accelerations, got {out_dim}")
-        if mirror and in_dim not in (13, 14):
-            raise ValueError(f"the airframe mirror takes 13 or 14 inputs, got {in_dim}")
-        if in_dim not in (13, 14, 16, 17):
-            raise ValueError(f"expected 13, 14, 16, or 17 inputs, got {in_dim}")
+        if mirror and in_dim != 13:
+            raise ValueError(f"the airframe mirror takes 13 canonical inputs, got {in_dim}")
+        if in_dim not in (13, 16):
+            raise ValueError(f"expected 13 or 16 inputs, got {in_dim}")
         self.mirror = bool(mirror)
         self.hidden_dim = int(hidden_dim)
         self.gru = torch.nn.GRUCell(in_dim, self.hidden_dim)
@@ -173,17 +173,16 @@ class ParityMotorNet(torch.nn.Module):
         self, in_dim: int, out_dim: int, hidden_per_type: int = 32
     ) -> None:
         super().__init__()
-        if in_dim not in (13, 14):
-            raise ValueError(f"parity model expects 13 or 14 canonical inputs, got {in_dim}")
+        if in_dim != 13:
+            raise ValueError(f"parity model expects 13 canonical inputs, got {in_dim}")
         if out_dim != 6:
             raise ValueError(f"expected 6 accelerations, got {out_dim}")
         self.hidden_per_type = int(hidden_per_type)
         if self.hidden_per_type < 1:
             raise ValueError("hidden_per_type must be positive")
 
-        # Input dimensions after the motor Hadamard transform. Battery voltage,
-        # when present, is invariant.
-        type_dims = (3 + (in_dim == 14), 4, 4, 2)
+        # Input dimensions after the motor Hadamard transform.
+        type_dims = (3, 4, 4, 2)
         width = self.hidden_per_type
         self.input_maps = torch.nn.ModuleList(
             torch.nn.Linear(size, width, bias=(kind == 0))
@@ -261,7 +260,6 @@ class ParityMotorNet(torch.nn.Module):
         velocity = features[..., 3:6]
         omega = features[..., 6:9]
         motors = features[..., 9:13]
-        voltage = features[..., 13:]
 
         # Orthonormal Hadamard coordinates for [FR, BR, BL, FL].
         collective = 0.5 * motors.sum(dim=-1, keepdim=True)
@@ -278,7 +276,7 @@ class ParityMotorNet(torch.nn.Module):
             + motors[..., 2:3] - motors[..., 3:4]
         )
         return (
-            torch.cat((gravity[..., 2:3], velocity[..., 2:3], collective, voltage), dim=-1),
+            torch.cat((gravity[..., 2:3], velocity[..., 2:3], collective), dim=-1),
             torch.cat((gravity[..., 1:2], velocity[..., 1:2], omega[..., 0:1], left_right), dim=-1),
             torch.cat((gravity[..., 0:1], velocity[..., 0:1], omega[..., 1:2], front_back), dim=-1),
             torch.cat((omega[..., 2:3], diagonal), dim=-1),
@@ -438,8 +436,8 @@ class EvenOddSplitNet(torch.nn.Module):
 
     def __init__(self, in_dim: int, hidden_dim: int = 47) -> None:
         super().__init__()
-        if in_dim not in (13, 14):
-            raise ValueError(f"even/odd split expects 13 or 14 inputs, got {in_dim}")
+        if in_dim != 13:
+            raise ValueError(f"even/odd split expects 13 canonical inputs, got {in_dim}")
         self.hidden_dim = int(hidden_dim)
         self.even = _OrbitGRU(in_dim, self.hidden_dim)
         self.odd = _OrbitGRU(in_dim, self.hidden_dim)
@@ -553,13 +551,13 @@ class ParityMLP(torch.nn.Module):
         depth: int = 2,
     ) -> None:
         super().__init__()
-        if in_dim not in (13, 14):
-            raise ValueError(f"parity MLP expects 13 or 14 canonical inputs, got {in_dim}")
+        if in_dim != 13:
+            raise ValueError(f"parity MLP expects 13 canonical inputs, got {in_dim}")
         if out_dim != 6:
             raise ValueError(f"expected 6 accelerations, got {out_dim}")
         if width < 1 or depth < 1:
             raise ValueError("width and depth must be positive")
-        type_dims = (3 + (in_dim == 14), 4, 4, 2)
+        type_dims = (3, 4, 4, 2)
         self.input_maps = torch.nn.ModuleList(
             torch.nn.Linear(size, width, bias=(kind == 0))
             for kind, size in enumerate(type_dims)
@@ -665,7 +663,7 @@ class ParityTemporalMLP(ParityMLP):
         self.memory_size = int(memory_size)
         self.in_dim = int(in_dim)
 
-        type_dims = (3 + (in_dim == 14), 4, 4, 2)
+        type_dims = (3, 4, 4, 2)
         copies = 1 + self.memory_size
         self.input_maps = torch.nn.ModuleList(
             torch.nn.Linear(size * copies, width, bias=(kind == 0))

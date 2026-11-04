@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from quadrotor.sequence import _mirror_acceleration, _mirror_features
+from quadrotor.neurobem.sequence import _mirror_acceleration, _mirror_features
 from quadrotor.neurobem.mlp_fullstate import (
     BATCH,
     DEFAULT_ROOT,

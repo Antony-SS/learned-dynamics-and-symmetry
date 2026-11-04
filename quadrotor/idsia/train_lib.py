@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from quadrotor.fit import train_device
+from quadrotor.geometry import train_device
 from quadrotor.idsia.baselines import _windows, fit_canonical_scalers, fit_scalers
 from quadrotor.idsia.data import load_idsia_prepared
 from quadrotor.idsia.models import QuadDynamicsNet, make_model, quotient
@@ -25,7 +25,7 @@ from quadrotor.idsia.recipe import (
     scaled_loss,
     time_weights,
 )
-from quadrotor.train import _apply, _so3_log
+from quadrotor.geometry import _apply, _so3_log
 
 
 def write_json(path: Path, payload: dict) -> None:
@@ -43,7 +43,7 @@ def flight_features(flight) -> np.ndarray:
     up = np.array((0.0, 0.0, 1.0), np.float32)
     gravity = np.einsum("nji,j->ni", rotation, up)
     velocity = np.einsum("nji,nj->ni", rotation, flight.velocity_world[:n])
-    return np.concatenate((gravity, velocity, flight.omega_body[:n], flight.pwm), axis=1).astype(
+    return np.concatenate((gravity, velocity, flight.omega_body[:n], flight.motors), axis=1).astype(
         np.float32
     )
 
@@ -66,7 +66,7 @@ def _starts(flights, horizon: int, stride: int):
 
 def pack_dynamics(flights, device: torch.device, history: int, horizon: int, stride: int):
     pairs = _starts(flights, horizon, stride)
-    p0, r0, v0, w0, pwm, dt, pt, rt, vt, wt, hist, y = (
+    p0, r0, v0, w0, motors, dt, pt, rt, vt, wt, hist, y = (
         [],
         [],
         [],
@@ -91,7 +91,7 @@ def pack_dynamics(flights, device: torch.device, history: int, horizon: int, str
         r0.append(f.rotation[s])
         v0.append(f.velocity_world[s])
         w0.append(f.omega_body[s])
-        pwm.append(f.pwm[s:stop])
+        motors.append(f.motors[s:stop])
         dt.append(f.dt[s:stop])
         pt.append(f.position[s + 1 : stop + 1])
         rt.append(f.rotation[s + 1 : stop + 1])
@@ -114,7 +114,7 @@ def pack_dynamics(flights, device: torch.device, history: int, horizon: int, str
         "r": torch.as_tensor(np.stack(r0), device=device),
         "v": torch.as_tensor(np.stack(v0), device=device),
         "w": torch.as_tensor(np.stack(w0), device=device),
-        "pwm": torch.as_tensor(np.stack(pwm), device=device),
+        "motors": torch.as_tensor(np.stack(motors), device=device),
         "dt": torch.as_tensor(np.stack(dt), device=device),
         "hist": torch.as_tensor(np.stack(hist), device=device),
         "rt": torch.as_tensor(np.stack(rt), device=device),
@@ -127,18 +127,18 @@ def roll_dynamics(model: QuadDynamicsNet, packed, index) -> torch.Tensor:
     r = packed["r"][index]
     v = packed["v"][index]
     w = packed["w"][index]
-    pwm = packed["pwm"][index]
+    motors = packed["motors"][index]
     dt = packed["dt"][index]
     buf = packed["hist"][index].clone()
     preds = []
-    for k in range(pwm.shape[1]):
+    for k in range(motors.shape[1]):
         flat = ((buf - model.x_mean) / model.x_scale).reshape(buf.shape[0], -1)
         acc = model(flat)
         p, r, v, w = _apply(p, r, v, w, acc, dt[:, k])
         so3 = _so3_log(r)
         preds.append(torch.cat((p, v, so3, w), dim=-1))
-        if k + 1 < pwm.shape[1]:
-            nxt = quotient(r, v, w, pwm[:, k + 1]).unsqueeze(1)
+        if k + 1 < motors.shape[1]:
+            nxt = quotient(r, v, w, motors[:, k + 1]).unsqueeze(1)
             buf = torch.cat((buf[:, 1:], nxt), dim=1)
     return torch.stack(preds, 1)
 

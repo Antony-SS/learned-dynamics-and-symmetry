@@ -22,9 +22,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from quadrotor.evaluate import benchmark_mae
-from quadrotor.fit import SymmetricModel, unpack_state
+from quadrotor.neurobem.fit import SymmetricModel, unpack_state
 from quadrotor.neurobem.data import load_neurobem_prepared
-from quadrotor.train import _integrate, _so3_log, module_device, prime_hidden
+from quadrotor.geometry import _integrate, _so3_log, module_device, prime_hidden
 
 CKPT = Path(__file__).resolve().parent / "out" / "parity18k" / "symmetric.pt"
 EVERY = 4  # 400 Hz -> 100 Hz
@@ -41,7 +41,7 @@ PAPER = {
 def at_100hz(flight):
     n = (flight.n_steps // EVERY) * EVERY
     if n < EVERY * (HISTORY + HORIZON):
-        return replace(flight, pwm=flight.pwm[:0], dt=flight.dt[:0])
+        return replace(flight, motors=flight.motors[:0], dt=flight.dt[:0])
     sl = slice(0, n, EVERY)
     return replace(
         flight,
@@ -49,8 +49,7 @@ def at_100hz(flight):
         rotation=flight.rotation[: n + 1 : EVERY],
         velocity_world=flight.velocity_world[: n + 1 : EVERY],
         omega_body=flight.omega_body[: n + 1 : EVERY],
-        pwm=flight.pwm[sl],
-        voltage=flight.voltage[sl],
+        motors=flight.motors[sl],
         dt=flight.dt[:n].reshape(-1, EVERY).sum(axis=1).astype(np.float32),
     )
 
@@ -69,17 +68,17 @@ def paper_metrics(model, flights) -> dict[str, float]:
     model.eval()
     for offset in range(0, len(pairs), BATCH):
         batch = pairs[offset : offset + BATCH]
-        pwm, dt, p, r, v, w = [], [], [], [], [], []
+        motors, dt, p, r, v, w = [], [], [], [], [], []
         for fi, s in batch:
             f = flights[fi]
             stop = s + HORIZON
-            pwm.append(f.pwm[s:stop])
+            motors.append(f.motors[s:stop])
             dt.append(f.dt[s:stop])
             p.append(f.position[s : stop + 1])
             r.append(f.rotation[s : stop + 1])
             v.append(f.velocity_world[s : stop + 1])
             w.append(f.omega_body[s : stop + 1])
-        pwm_t = torch.as_tensor(np.stack(pwm), device=device)
+        motors_t = torch.as_tensor(np.stack(motors), device=device)
         dt_t = torch.as_tensor(np.stack(dt), device=device)
         p_t = torch.as_tensor(np.stack(p), device=device)
         r_t = torch.as_tensor(np.stack(r), device=device)
@@ -87,7 +86,7 @@ def paper_metrics(model, flights) -> dict[str, float]:
         w_t = torch.as_tensor(np.stack(w), device=device)
         hidden = prime_hidden(model, flights, batch, HISTORY)
         p_hat, r_hat, v_hat, w_hat = _integrate(
-            model, pwm_t, dt_t, p_t[:, 0], r_t[:, 0], v_t[:, 0], w_t[:, 0], None, hidden=hidden
+            model, motors_t, dt_t, p_t[:, 0], r_t[:, 0], v_t[:, 0], w_t[:, 0], hidden=hidden
         )
         rel = torch.matmul(r_t[:, 1:].transpose(-1, -2), r_hat)
         vel_sq = (v_hat - v_t[:, 1:]).square().sum(-1) + (w_hat - w_t[:, 1:]).square().sum(-1)
@@ -114,7 +113,7 @@ def main() -> None:
         f"open-loop / coupled  test flights {len(test)}",
         flush=True,
     )
-    model = SymmetricModel(include_voltage=False)
+    model = SymmetricModel()
     model.load_state_dict(unpack_state(torch.load(CKPT, map_location="cpu", weights_only=False)))
     model.to(device).eval()
     print(f"loaded {CKPT}  scoring paper metrics", flush=True)

@@ -17,15 +17,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import quadrotor.neurobem.nyu_decoupled18k as nyu
-from quadrotor.fit import SymmetricModel, n_params, train_device, unpack_state
+from quadrotor.geometry import _features, _so3_log, module_device, prime_hidden, train_device
 from quadrotor.neurobem.data import load_neurobem_prepared
-from quadrotor.train import (
-    _configure_input_normalization,
-    _features,
-    _so3_log,
-    module_device,
-    prime_hidden,
-)
+from quadrotor.neurobem.fit import SymmetricModel, n_params, unpack_state
+from quadrotor.neurobem.openloop import _configure_input_normalization
 
 CKPT = nyu.OUT / "decoupled18k.pt"
 
@@ -38,7 +33,7 @@ class IncrementParity(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.core = SymmetricModel(include_voltage=False)
+        self.core = SymmetricModel()
         self.inc = torch.nn.Sequential(
             torch.nn.Linear(3, 32),
             torch.nn.Tanh(),
@@ -63,13 +58,13 @@ def increments(r: torch.Tensor, horizon: int) -> torch.Tensor:
     return _so3_log(rel.reshape(-1, 3, 3)).reshape(r.shape[0], horizon, 3)
 
 
-def roll_velocity_inc(model, pwm, dt, r_gt, v, w, hidden, inc):
+def roll_velocity_inc(model, motors, dt, r_gt, v, w, hidden, inc):
     vs, ws = [], []
     dummy = v.new_zeros(v.shape[0], 3)
-    for t in range(pwm.shape[1]):
+    for t in range(motors.shape[1]):
         rot = r_gt[:, t]
         acc, hidden = model.step(
-            _features(model, dummy, rot, v, w, pwm[:, t]), hidden, inc[:, t]
+            _features(model, dummy, rot, v, w, motors[:, t]), hidden, inc[:, t]
         )
         step = dt[:, t].unsqueeze(-1)
         v = v + torch.bmm(rot, acc[:, 0:3].unsqueeze(-1)).squeeze(-1) * step
@@ -83,7 +78,7 @@ def prime_inc(model, flights, pairs, device):
     hidden = model.initial_hidden(len(pairs), torch.zeros(len(pairs), 1, device=device))
     dummy = torch.zeros(len(pairs), 3, device=device)
     for offset in range(nyu.HISTORY):
-        pos, rot, vel, ome, pwm, nxt = [], [], [], [], [], []
+        pos, rot, vel, ome, motors, nxt = [], [], [], [], [], []
         for index, start in pairs:
             flight = flights[index]
             step = min(max(0, start - nyu.HISTORY + offset), flight.n_steps - 2)
@@ -92,7 +87,7 @@ def prime_inc(model, flights, pairs, device):
             nxt.append(flight.rotation[step + 1])
             vel.append(flight.velocity_world[step])
             ome.append(flight.omega_body[step])
-            pwm.append(flight.pwm[step])
+            motors.append(flight.motors[step])
         r0 = torch.as_tensor(np.stack(rot), device=device)
         r1 = torch.as_tensor(np.stack(nxt), device=device)
         inc = _so3_log(torch.matmul(r0.transpose(1, 2), r1))
@@ -102,7 +97,7 @@ def prime_inc(model, flights, pairs, device):
             r0,
             torch.as_tensor(np.stack(vel), device=device),
             torch.as_tensor(np.stack(ome), device=device),
-            torch.as_tensor(np.stack(pwm), device=device),
+            torch.as_tensor(np.stack(motors), device=device),
         )
         _, hidden = model.step(feat, hidden, inc)
     return hidden
@@ -116,15 +111,15 @@ def score_split(vel, flights, use_increment: bool = False) -> dict[str, float]:
     vel.eval()
     for offset in range(0, len(pairs), nyu.BATCH):
         batch = pairs[offset : offset + nyu.BATCH]
-        pwm, dt, _p, r, v, w = nyu.tensors(flights, batch, nyu.EVAL_H, device)
+        motors, dt, _p, r, v, w = nyu.tensors(flights, batch, nyu.EVAL_H, device)
         if use_increment:
             hidden = prime_inc(vel, flights, batch, device)
             v_hat, w_hat = roll_velocity_inc(
-                vel, pwm, dt, r, v[:, 0], w[:, 0], hidden, increments(r, nyu.EVAL_H)
+                vel, motors, dt, r, v[:, 0], w[:, 0], hidden, increments(r, nyu.EVAL_H)
             )
         else:
             hidden = prime_hidden(vel, flights, batch, nyu.HISTORY)
-            v_hat, w_hat = nyu.roll_velocity(vel, pwm, dt, r, v[:, 0], w[:, 0], hidden)
+            v_hat, w_hat = nyu.roll_velocity(vel, motors, dt, r, v[:, 0], w[:, 0], hidden)
         dv += float((v_hat - v[:, 1:]).square().sum(-1).sum().cpu())
         dw += float((w_hat - w[:, 1:]).square().sum(-1).sum().cpu())
         n += float((v_hat - v[:, 1:]).square().sum(-1).numel())
@@ -186,10 +181,10 @@ def train_increment(model, flights, pairs) -> None:
         total = seen = 0.0
         for offset in range(0, len(order), nyu.BATCH):
             batch = [pairs[i] for i in order[offset : offset + nyu.BATCH]]
-            pwm, dt, _p, r, v, w = nyu.tensors(flights, batch, nyu.TRAIN_H, device)
+            motors, dt, _p, r, v, w = nyu.tensors(flights, batch, nyu.TRAIN_H, device)
             hidden = prime_inc(model, flights, batch, device)
             v_hat, w_hat = roll_velocity_inc(
-                model, pwm, dt, r, v[:, 0], w[:, 0], hidden, increments(r, nyu.TRAIN_H)
+                model, motors, dt, r, v[:, 0], w[:, 0], hidden, increments(r, nyu.TRAIN_H)
             )
             loss = (v_hat - v[:, 1:]).square().mean() + (w_hat - w[:, 1:]).square().mean()
             opt.zero_grad(set_to_none=True)
@@ -216,7 +211,7 @@ def main() -> None:
     if not CKPT.is_file():
         raise SystemExit(f"missing {CKPT}")
     payload = torch.load(CKPT, map_location="cpu", weights_only=False)
-    vel = SymmetricModel(include_voltage=False)
+    vel = SymmetricModel()
     vel.load_state_dict(unpack_state(payload["vel"]))
     vel.to(device).eval()
 

@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 
 from quadrotor.idsia.baselines import BaseQuadModel, PhysQuadModel, ResidualQuadModel
-from quadrotor.train import _apply, _features, _so3_exp, _so3_log
+from quadrotor.geometry import _apply, _features, _so3_exp, _so3_log
 
 HISTORY = 10
 HIDDEN = 64
@@ -28,7 +28,7 @@ _ORBIT_W = (
     (1.0, -1.0, -1.0),
     (-1.0, -1.0, 1.0),
 )
-_ORBIT_PWM = ((0, 1, 2, 3), (3, 2, 1, 0), (1, 0, 3, 2), (2, 3, 0, 1))
+_ORBIT_MOTORS = ((0, 1, 2, 3), (3, 2, 1, 0), (1, 0, 3, 2), (2, 3, 0, 1))
 _ORBIT_ACC = (
     (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
     (1.0, -1.0, 1.0, -1.0, 1.0, -1.0),
@@ -47,9 +47,9 @@ def _mlp(in_dim: int, hidden: int, n_hidden: int, out_dim: int) -> nn.Sequential
     return nn.Sequential(*layers)
 
 
-def quotient(rotation: torch.Tensor, velocity_world: torch.Tensor, omega: torch.Tensor, pwm: torch.Tensor) -> torch.Tensor:
-    dummy = type("M", (), {"reads_pose": False, "reads_voltage": False, "reads_height": False})()
-    return _features(dummy, None, rotation, velocity_world, omega, pwm, None)
+def quotient(rotation: torch.Tensor, velocity_world: torch.Tensor, omega: torch.Tensor, motors: torch.Tensor) -> torch.Tensor:
+    dummy = type("M", (), {"reads_pose": False, "reads_height": False})()
+    return _features(dummy, None, rotation, velocity_world, omega, motors)
 
 
 class QuadDynamicsNet(nn.Module):
@@ -59,7 +59,6 @@ class QuadDynamicsNet(nn.Module):
     """
 
     reads_pose = False
-    reads_voltage = False
     reads_height = False
     family = "quad_dynamics"
 
@@ -74,7 +73,7 @@ class QuadDynamicsNet(nn.Module):
         self.register_buffer("x_scale", torch.ones(13))
         self.register_buffer("orbit_gv", torch.tensor(_ORBIT_GV, dtype=torch.float32))
         self.register_buffer("orbit_w", torch.tensor(_ORBIT_W, dtype=torch.float32))
-        self.register_buffer("orbit_pwm", torch.tensor(_ORBIT_PWM, dtype=torch.long))
+        self.register_buffer("orbit_motors", torch.tensor(_ORBIT_MOTORS, dtype=torch.long))
         self.register_buffer("orbit_acc", torch.tensor(_ORBIT_ACC, dtype=torch.float32))
 
     def set_stats(self, mean: torch.Tensor, scale: torch.Tensor) -> None:
@@ -87,13 +86,13 @@ class QuadDynamicsNet(nn.Module):
             return self.net(stacked)
         batch = stacked.shape[0]
         slots = stacked.reshape(batch, self.history, 13)
-        pwm = slots[..., 9:13]
-        index = self.orbit_pwm.view(4, 1, 1, 4).expand(4, batch, self.history, 4)
+        motors = slots[..., 9:13]
+        index = self.orbit_motors.view(4, 1, 1, 4).expand(4, batch, self.history, 4)
         orbit = torch.cat(
             (
                 slots[..., 0:6].unsqueeze(0) * self.orbit_gv.view(4, 1, 1, 6),
                 slots[..., 6:9].unsqueeze(0) * self.orbit_w.view(4, 1, 1, 3),
-                pwm.unsqueeze(0).expand(4, -1, -1, -1).gather(-1, index),
+                motors.unsqueeze(0).expand(4, -1, -1, -1).gather(-1, index),
             ),
             dim=-1,
         )
@@ -111,8 +110,8 @@ class QuadDynamicsNet(nn.Module):
         flat = ((buf - self.x_mean) / self.x_scale).reshape(buf.shape[0], -1)
         return self._predict(flat), buf
 
-    def advance(self, p, r, v_w, w, pwm, dt, hidden):
-        feat = quotient(r, v_w, w, pwm)
+    def advance(self, p, r, v_w, w, motors, dt, hidden):
+        feat = quotient(r, v_w, w, motors)
         acc, hidden = self.step(feat, hidden)
         p, r, v_w, w = _apply(p, r, v_w, w, acc, dt)
         return p, r, v_w, w, hidden
@@ -194,7 +193,7 @@ class SymmetricResidual(nn.Module):
         nn.init.zeros_(self.out.bias)
         self.register_buffer("orbit_gv", torch.tensor(_ORBIT_GV, dtype=torch.float32))
         self.register_buffer("orbit_w", torch.tensor(_ORBIT_W, dtype=torch.float32))
-        self.register_buffer("orbit_pwm", torch.tensor(_ORBIT_PWM, dtype=torch.long))
+        self.register_buffer("orbit_motors", torch.tensor(_ORBIT_MOTORS, dtype=torch.long))
         self.register_buffer(
             "orbit_polar",
             torch.tensor(
@@ -212,13 +211,13 @@ class SymmetricResidual(nn.Module):
 
     def body_dx(self, canonical: torch.Tensor) -> torch.Tensor:
         batch = canonical.shape[0]
-        pwm = canonical[:, 9:13]
-        index = self.orbit_pwm.view(4, 1, 4).expand(4, batch, 4)
+        motors = canonical[:, 9:13]
+        index = self.orbit_motors.view(4, 1, 4).expand(4, batch, 4)
         orbit = torch.cat(
             (
                 canonical[:, 0:6].unsqueeze(0) * self.orbit_gv.view(4, 1, 6),
                 canonical[:, 6:9].unsqueeze(0) * self.orbit_w.view(4, 1, 3),
-                pwm.unsqueeze(0).expand(4, -1, -1).gather(-1, index),
+                motors.unsqueeze(0).expand(4, -1, -1).gather(-1, index),
             ),
             dim=-1,
         )

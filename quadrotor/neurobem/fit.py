@@ -1,4 +1,4 @@
-"""Load-or-train helpers shared by the IDSIA / NeuroBEM / NanoBench notebooks."""
+"""Load-or-train ParityMotorNet for NeuroBEM leftover experiments."""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ from pathlib import Path
 import torch
 
 from quadrotor.canonical import PreparedFlight, canonical_dim, output_dim
-from quadrotor.sequence import ParityMotorNet
-from quadrotor.train import train_open_loop
+from quadrotor.geometry import train_device
+from quadrotor.neurobem.openloop import train_open_loop
+from quadrotor.neurobem.sequence import ParityMotorNet
 
 PARITY_WIDTH = 24
 EPOCHS = 20
@@ -17,13 +18,6 @@ EPOCHS = 20
 
 def n_params(model: torch.nn.Module) -> int:
     return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-
-
-def train_device(requested: str | torch.device = "cpu") -> torch.device:
-    requested = torch.device(requested)
-    if requested.type == "cpu" and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return requested
 
 
 def unpack_state(payload: object) -> dict[str, torch.Tensor]:
@@ -39,13 +33,12 @@ def unpack_state(payload: object) -> dict[str, torch.Tensor]:
 class SymmetricModel(ParityMotorNet):
     """Official one-pass Z2×Z2 leftover. Same net on every dataset."""
 
-    def __init__(self, include_voltage: bool = False) -> None:
+    def __init__(self) -> None:
         super().__init__(
-            canonical_dim(include_voltage),
+            canonical_dim(),
             output_dim(),
             hidden_per_type=PARITY_WIDTH,
         )
-        self.reads_voltage = bool(include_voltage)
 
 
 def load_or_train_symmetric(
@@ -61,7 +54,6 @@ def load_or_train_symmetric(
     horizon: int = 50,
     warm_start: bool = False,
     warm_steps: int = 0,
-    include_voltage: bool = False,
     name: str = "symmetric",
 ) -> tuple[torch.nn.Module, list[dict]]:
     """Fit ParityMotorNet-24 if ``folder/name.pt`` is missing. Never overwrites."""
@@ -70,7 +62,7 @@ def load_or_train_symmetric(
     path = folder / f"{name}.pt"
     history_path = folder / "results.json"
     eval_device = torch.device(device)
-    model = SymmetricModel(include_voltage=include_voltage)
+    model = SymmetricModel()
     if path.is_file():
         payload = torch.load(path, map_location="cpu", weights_only=False)
         model.load_state_dict(unpack_state(payload))

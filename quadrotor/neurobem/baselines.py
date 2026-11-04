@@ -16,7 +16,7 @@ from quadrotor.evaluate import benchmark_mae
 from quadrotor.geometry import quat_to_matrix
 from quadrotor.neurobem.data import DEFAULT_ROOT, DOWNSAMPLE, _flight_id, _segment_id
 from quadrotor.neurobem.tcn import NeuroBEMTCN
-from quadrotor.train import _apply, _so3_log, module_device
+from quadrotor.geometry import _apply, _so3_log, module_device
 
 CHECKPOINT_DIR = Path(__file__).resolve().parent / "out" / "tcn_100hz"
 MASS = 0.772
@@ -49,8 +49,7 @@ def _load_tcn_arrays(path: Path) -> tuple[np.ndarray, np.ndarray, PreparedFlight
         rotation=rotation,
         velocity_world=velocity_world,
         omega_body=omega,
-        pwm=motors[:-1],
-        voltage=frame["vbat"].to_numpy(np.float32)[:-1],
+        motors=motors[:-1],
         dt=dt,
         attitude="Vicon",
     )
@@ -142,12 +141,12 @@ class TCNDynamics(torch.nn.Module):
         rotation: torch.Tensor,
         velocity_world: torch.Tensor,
         omega: torch.Tensor,
-        pwm: torch.Tensor,
+        motors: torch.Tensor,
     ) -> torch.Tensor:
         velocity_body = torch.bmm(
             rotation.transpose(1, 2), velocity_world.unsqueeze(-1)
         ).squeeze(-1)
-        return torch.cat((omega, velocity_body, pwm), dim=-1)
+        return torch.cat((omega, velocity_body, motors), dim=-1)
 
     def prime_hidden(self, flight: PreparedFlight, start: int, device: torch.device) -> torch.Tensor:
         velocity_body = np.einsum(
@@ -159,7 +158,7 @@ class TCNDynamics(torch.nn.Module):
             (
                 flight.omega_body[start - HISTORY + 1 : start + 1],
                 velocity_body,
-                flight.pwm[start - HISTORY + 1 : start + 1],
+                flight.motors[start - HISTORY + 1 : start + 1],
             ),
             axis=1,
         )
@@ -171,11 +170,11 @@ class TCNDynamics(torch.nn.Module):
         rotation: torch.Tensor,
         velocity_world: torch.Tensor,
         omega_body: torch.Tensor,
-        pwm: torch.Tensor,
+        motors: torch.Tensor,
         dt: torch.Tensor,
         hidden: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        features = self._features(rotation, velocity_world, omega_body, pwm)
+        features = self._features(rotation, velocity_world, omega_body, motors)
         hidden = torch.cat((hidden[:, 1:], features.unsqueeze(1)), dim=1)
         force_torque = self.tcn(hidden)
         force, torque = force_torque[:, :3], force_torque[:, 3:]
@@ -353,8 +352,8 @@ def score_tcn(
                 [model.prime_hidden(flights[i], start, device) for i, start in batch],
                 dim=0,
             )
-            pwm = torch.stack(
-                [torch.as_tensor(flights[i].pwm[start : start + horizon]) for i, start in batch]
+            motors = torch.stack(
+                [torch.as_tensor(flights[i].motors[start : start + horizon]) for i, start in batch]
             ).to(device)
             dt = torch.stack(
                 [torch.as_tensor(flights[i].dt[start : start + horizon]) for i, start in batch]
@@ -374,7 +373,7 @@ def score_tcn(
             hats = {name: [] for name in totals}
             for step in range(horizon):
                 position, rotation, velocity, omega, hidden = model.advance(
-                    position, rotation, velocity, omega, pwm[:, step], dt[:, step], hidden
+                    position, rotation, velocity, omega, motors[:, step], dt[:, step], hidden
                 )
                 true_p = torch.stack(
                     [torch.as_tensor(flights[i].position[start + step + 1]) for i, start in batch]

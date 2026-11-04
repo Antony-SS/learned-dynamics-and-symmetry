@@ -11,8 +11,8 @@ import torch
 
 from quadrotor.geometry import quat_to_matrix
 from quadrotor.neurobem.data import DEFAULT_ROOT, _flight_id, _segment_id
-from quadrotor.sequence import _mirror_acceleration, _mirror_features
-from quadrotor.train import _so3_exp, _so3_log
+from quadrotor.geometry import _so3_exp, _so3_log
+from quadrotor.neurobem.sequence import _mirror_acceleration, _mirror_features
 
 RATE_HZ = 400.0
 EVAL_H = 200

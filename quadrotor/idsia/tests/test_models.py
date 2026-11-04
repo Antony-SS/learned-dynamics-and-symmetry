@@ -2,7 +2,7 @@ import torch
 
 from quadrotor.idsia.models import PhysQuotient, PhysQuotientSym, QuadDynamicsNet, quotient
 from quadrotor.idsia.recipe import time_weights
-from quadrotor.train import _so3_exp
+from quadrotor.geometry import _so3_exp
 
 
 def test_time_weights_sum_to_one():
@@ -59,6 +59,6 @@ def test_quotient_is_13d():
     r = _so3_exp(torch.zeros(2, 3))
     v = torch.zeros(2, 3)
     w = torch.zeros(2, 3)
-    pwm = torch.ones(2, 4)
-    q = quotient(r, v, w, pwm)
+    motors = torch.ones(2, 4)
+    q = quotient(r, v, w, motors)
     assert q.shape == (2, 13)

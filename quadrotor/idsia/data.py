@@ -43,8 +43,7 @@ def _load(path: Path) -> PreparedFlight:
         rotation=rotation,
         velocity_world=values[:, 8:11],
         omega_body=values[:, 11:14],
-        pwm=values[:-1, 14:18],
-        voltage=np.zeros(len(dt), dtype=np.float32),
+        motors=values[:-1, 14:18],  # m1_rads … m4_rads
         dt=dt,
         attitude="motion capture",
     )

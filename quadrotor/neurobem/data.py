@@ -52,8 +52,7 @@ def _load(path: Path) -> PreparedFlight:
         omega_body=frame[["ang vel x", "ang vel y", "ang vel z"]].to_numpy(
             dtype=np.float32
         ),
-        pwm=motors[:-1],
-        voltage=frame["vbat"].to_numpy(dtype=np.float32)[:-1],
+        motors=motors[:-1],
         dt=dt,
         attitude="Vicon",
     )

@@ -1,10 +1,4 @@
-"""Open-loop fit of a coherent recurrent quadrotor transition.
-
-A window is seeded once from Vicon. The network then propagates its own
-position, attitude, velocity, and angular velocity from the motor sequence.
-It predicts only body-frame linear and angular acceleration; kinematics
-determine every pose update. The MSE covers all four observed state components.
-"""
+"""Open-loop GRU / leftover trainer used by NeuroBEM experiments."""
 
 from __future__ import annotations
 
@@ -15,232 +9,43 @@ import torch
 
 from learned_dynamics.train import TrainResult
 from quadrotor.canonical import HORIZON_STEPS, PreparedFlight
-from quadrotor.geometry import so3_log_batch
-from quadrotor.rollout import held_out_rmse
-
-_ANGLE_EPS = 1e-8
-
-
-def module_device(model: torch.nn.Module) -> torch.device:
-    """Device of a module that may have buffers but no parameters."""
-    for tensor in model.parameters():
-        return tensor.device
-    for tensor in model.buffers():
-        return tensor.device
-    return torch.device("cpu")
+from quadrotor.geometry import (
+    _integrate,
+    _so3_log,
+    module_device,
+    prime_hidden,
+    so3_log_batch,
+    window_starts,
+)
 
 
-def _hat(vector: torch.Tensor) -> torch.Tensor:
-    x, y, z = vector.unbind(-1)
-    zeros = torch.zeros_like(x)
-    row0 = torch.stack((zeros, -z, y), dim=-1)
-    row1 = torch.stack((z, zeros, -x), dim=-1)
-    row2 = torch.stack((-y, x, zeros), dim=-1)
-    return torch.stack((row0, row1, row2), dim=-2)
-
-
-def _so3_exp(phi: torch.Tensor) -> torch.Tensor:
-    theta = torch.linalg.norm(phi, dim=-1, keepdim=True)
-    small = theta < _ANGLE_EPS
-    theta_safe = theta.clamp_min(_ANGLE_EPS)
-    axis = phi / theta_safe
-    skew = _hat(axis)
-    eye = torch.eye(3, device=phi.device, dtype=phi.dtype).expand(phi.shape[0], 3, 3)
-    sine = torch.sin(theta_safe)[..., None]
-    cosine = torch.cos(theta_safe)[..., None]
-    rotation = eye + sine * skew + (1.0 - cosine) * (skew @ skew)
-    return torch.where(small[..., None], eye + _hat(phi), rotation)
-
-
-def _so3_log(rotation: torch.Tensor) -> torch.Tensor:
-    cosine = ((torch.diagonal(rotation, dim1=-2, dim2=-1).sum(-1) - 1.0) / 2.0).clamp(-1.0, 1.0)
-    half_vee = 0.5 * torch.stack(
-        (
-            rotation[..., 2, 1] - rotation[..., 1, 2],
-            rotation[..., 0, 2] - rotation[..., 2, 0],
-            rotation[..., 1, 0] - rotation[..., 0, 1],
-        ),
-        dim=-1,
-    )
-    sine = torch.linalg.vector_norm(half_vee, dim=-1)
-    theta = torch.atan2(sine, cosine)
-    scale = torch.where(sine < _ANGLE_EPS, torch.ones_like(sine), theta / sine)
-    return scale.unsqueeze(-1) * half_vee
-
-
-def _features(
-    model: torch.nn.Module,
-    position: torch.Tensor,
-    rotation: torch.Tensor,
-    velocity_world: torch.Tensor,
-    omega_body: torch.Tensor,
-    pwm: torch.Tensor,
-    voltage: torch.Tensor | None = None,
-) -> torch.Tensor:
-    if getattr(model, "reads_pose", False):
-        parts = (position, velocity_world, _so3_log(rotation), omega_body, pwm)
-        features = torch.cat(parts, dim=-1)
-        if getattr(model, "reads_voltage", False):
-            if voltage is None:
-                raise ValueError("voltage-aware model requires battery voltage")
-            features = torch.cat((features, voltage.unsqueeze(-1)), dim=-1)
-        if getattr(model, "reads_height", False):
-            features = torch.cat((features, position[..., 2:3]), dim=-1)
-        return features
-    velocity_body = torch.bmm(rotation.transpose(1, 2), velocity_world.unsqueeze(-1)).squeeze(-1)
-    up_world = rotation.new_tensor((0.0, 0.0, 1.0)).expand(rotation.shape[0], 3)
-    gravity_body = torch.bmm(
-        rotation.transpose(1, 2), up_world.unsqueeze(-1)
-    ).squeeze(-1)
-    features = torch.cat((gravity_body, velocity_body, omega_body, pwm), dim=-1)
-    if getattr(model, "reads_voltage", False):
-        if voltage is None:
-            raise ValueError("voltage-aware model requires battery voltage")
-        features = torch.cat((features, voltage.unsqueeze(-1)), dim=-1)
-    if getattr(model, "reads_height", False):
-        features = torch.cat((features, position[..., 2:3]), dim=-1)
-    return features
-
-
-def _apply(
-    position: torch.Tensor,
-    rotation: torch.Tensor,
-    velocity_world: torch.Tensor,
-    omega_body: torch.Tensor,
-    acceleration: torch.Tensor,
-    dt: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    dt = dt.unsqueeze(-1)
-    acceleration_world = torch.bmm(
-        rotation, acceleration[:, 0:3].unsqueeze(-1)
-    ).squeeze(-1)
-    angular_acceleration = acceleration[:, 3:6]
-    position = position + velocity_world * dt + 0.5 * acceleration_world * dt.square()
-    velocity_world = velocity_world + acceleration_world * dt
-    rotation_increment = (omega_body + 0.5 * angular_acceleration * dt) * dt
-    rotation = torch.bmm(rotation, _so3_exp(rotation_increment))
-    omega_body = omega_body + angular_acceleration * dt
-    return position, rotation, velocity_world, omega_body
-
-
-def _starts(flights: list[PreparedFlight], horizon: int, stride: int) -> list[tuple[int, int]]:
-    pairs: list[tuple[int, int]] = []
-    for index, flight in enumerate(flights):
-        last = flight.n_steps - horizon
-        if last < 0:
-            raise ValueError(
-                f"{flight.name} has {flight.n_steps} steps, shorter than a {horizon} step window"
-            )
-        for start in range(0, last + 1, stride):
-            pairs.append((index, start))
-    if not pairs:
-        raise ValueError("no training windows")
-    return pairs
-
-
-def _integrate(
-    model: torch.nn.Module,
-    pwm: torch.Tensor,
-    dt: torch.Tensor,
-    position: torch.Tensor,
-    rotation: torch.Tensor,
-    velocity_world: torch.Tensor,
-    omega_body: torch.Tensor,
-    voltage: torch.Tensor | None = None,
-    hidden: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Roll the complete predicted state through the motor sequence."""
-    positions, rotations, velocities, omegas = [], [], [], []
-    if hidden is None:
-        hidden = model.initial_hidden(pwm.shape[0], pwm)
-    advance = getattr(model, "advance", None)
-    for index in range(pwm.shape[1]):
-        if callable(advance):
-            position, rotation, velocity_world, omega_body, hidden = advance(
-                position,
-                rotation,
-                velocity_world,
-                omega_body,
-                pwm[:, index],
-                dt[:, index],
-                hidden,
-            )
-        else:
-            features = _features(
-                model,
-                position,
-                rotation,
-                velocity_world,
-                omega_body,
-                pwm[:, index],
-                None if voltage is None else voltage[:, index],
-            )
-            acceleration, hidden = model.step(features, hidden)
-            position, rotation, velocity_world, omega_body = _apply(
-                position, rotation, velocity_world, omega_body, acceleration, dt[:, index]
-            )
-        positions.append(position)
-        rotations.append(rotation)
-        velocities.append(velocity_world)
-        omegas.append(omega_body)
-    return (
-        torch.stack(positions, dim=1),
-        torch.stack(rotations, dim=1),
-        torch.stack(velocities, dim=1),
-        torch.stack(omegas, dim=1),
-    )
-
-
-def prime_hidden(
-    model: torch.nn.Module,
-    flights: list[PreparedFlight],
-    pairs: list[tuple[int, int]],
-    warm_steps: int,
-    voltage_value: float | None = None,
-) -> torch.Tensor | None:
-    """Teacher-force ``warm_steps`` Vicon frames ending at each window seed.
-
-    This is the NeuroBEM-style prime (20 samples = 50 ms at 400 Hz), not a
-    walk over the whole flight.
-    """
-    if warm_steps <= 0:
-        return None
+def held_out_rmse(model: torch.nn.Module, flights: list[PreparedFlight]) -> float:
     device = module_device(model)
-    reference = torch.zeros(len(pairs), 1, device=device)
-    hidden = model.initial_hidden(len(pairs), reference)
-    if hidden.numel() == 0:
-        return hidden
-    for offset in range(warm_steps):
-        position, rotation, velocity, omega, pwm, voltage = [], [], [], [], [], []
-        for index, start in pairs:
-            flight = flights[index]
-            step = min(max(0, start - warm_steps + offset), flight.n_steps - 1)
-            position.append(flight.position[step])
-            rotation.append(flight.rotation[step])
-            velocity.append(flight.velocity_world[step])
-            omega.append(flight.omega_body[step])
-            pwm.append(flight.pwm[step])
-            voltage.append(flight.voltage[step])
-        voltage_t = torch.as_tensor(np.stack(voltage), device=device)
-        if voltage_value is not None:
-            voltage_t = torch.full_like(voltage_t, float(voltage_value))
-        features = _features(
-            model,
-            torch.as_tensor(np.stack(position), device=device),
-            torch.as_tensor(np.stack(rotation), device=device),
-            torch.as_tensor(np.stack(velocity), device=device),
-            torch.as_tensor(np.stack(omega), device=device),
-            torch.as_tensor(np.stack(pwm), device=device),
-            voltage_t,
-        )
-        step_fn = getattr(model, "step", None)
-        if callable(step_fn):
-            _acceleration, hidden = step_fn(features, hidden)
-        else:
-            neural = getattr(model, "neural", None)
-            if neural is not None and callable(getattr(neural, "step", None)):
-                _acceleration, hidden = neural.step(features, hidden)
-    return hidden
+    total = 0.0
+    weight = 0.0
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad():
+            for flight in flights:
+                motors = torch.as_tensor(flight.motors, device=device).unsqueeze(0)
+                dt = torch.as_tensor(flight.dt, device=device).unsqueeze(0)
+                position = torch.as_tensor(flight.position[0], device=device).unsqueeze(0)
+                rotation = torch.as_tensor(flight.rotation[0], device=device).unsqueeze(0)
+                velocity = torch.as_tensor(flight.velocity_world[0], device=device).unsqueeze(0)
+                omega = torch.as_tensor(flight.omega_body[0], device=device).unsqueeze(0)
+                positions, *_ = _integrate(
+                    model, motors, dt, position, rotation, velocity, omega
+                )
+                pred = positions.squeeze(0).cpu().numpy()
+                error = pred - flight.position[: pred.shape[0]]
+                rmse = float(np.sqrt(np.mean(np.sum(error**2, axis=1))))
+                total += (rmse**2) * flight.n_poses
+                weight += flight.n_poses
+    finally:
+        if was_training:
+            model.train()
+    return float(np.sqrt(total / weight))
 
 
 def _batch_mse(
@@ -253,8 +58,7 @@ def _batch_mse(
     hidden_cache: list[list[torch.Tensor]] | None = None,
     warm_steps: int = 0,
 ) -> torch.Tensor:
-    pwm = []
-    voltage = []
+    motors = []
     dt = []
     position = []
     rotation = []
@@ -263,8 +67,7 @@ def _batch_mse(
     for index, start in pairs:
         flight = flights[index]
         stop = start + horizon
-        pwm.append(flight.pwm[start:stop])
-        voltage.append(flight.voltage[start:stop])
+        motors.append(flight.motors[start:stop])
         dt.append(flight.dt[start:stop])
         position.append(flight.position[start : stop + 1])
         rotation.append(flight.rotation[start : stop + 1])
@@ -273,8 +76,7 @@ def _batch_mse(
     device = module_device(model)
     if hasattr(model, "reset_residual_stats"):
         model.reset_residual_stats()
-    pwm_t = torch.as_tensor(np.stack(pwm), device=device)
-    voltage_t = torch.as_tensor(np.stack(voltage), device=device)
+    motors_t = torch.as_tensor(np.stack(motors), device=device)
     dt_t = torch.as_tensor(np.stack(dt), device=device)
     position_t = torch.as_tensor(np.stack(position), device=device)
     rotation_t = torch.as_tensor(np.stack(rotation), device=device)
@@ -290,13 +92,12 @@ def _batch_mse(
         hidden = prime_hidden(model, flights, pairs, warm_steps)
     position_hat, rotation_hat, velocity_hat, omega_hat = _integrate(
         model,
-        pwm_t,
+        motors_t,
         dt_t,
         position_t[:, 0],
         rotation_t[:, 0],
         velocity_t[:, 0],
         omega_t[:, 0],
-        voltage_t,
         hidden=hidden,
     )
     relative = torch.matmul(rotation_t[:, 1:].transpose(-1, -2), rotation_hat)
@@ -380,12 +181,7 @@ def _input_rows(model: torch.nn.Module, flights: list[PreparedFlight]) -> np.nda
                         flight.velocity_world[:-1],
                         rotation_vector,
                         flight.omega_body[:-1],
-                        flight.pwm,
-                        *(
-                            (flight.voltage[:, None],)
-                            if getattr(model, "reads_voltage", False)
-                            else ()
-                        ),
+                        flight.motors,
                         *(
                             (flight.position[:-1, 2:3],)
                             if getattr(model, "reads_height", False)
@@ -412,12 +208,7 @@ def _input_rows(model: torch.nn.Module, flights: list[PreparedFlight]) -> np.nda
                         gravity_body,
                         velocity_body,
                         flight.omega_body[:-1],
-                        flight.pwm,
-                        *(
-                            (flight.voltage[:, None],)
-                            if getattr(model, "reads_voltage", False)
-                            else ()
-                        ),
+                        flight.motors,
                         *(
                             (flight.position[:-1, 2:3],)
                             if getattr(model, "reads_height", False)
@@ -511,8 +302,8 @@ def train_open_loop(
     )
     if model(probe).shape[-1] != 6:
         raise ValueError("model must write 6 body-frame accelerations")
-    train_pairs = _starts(train_flights, horizon, stride)
-    val_pairs = _starts(val_flights, horizon, stride)
+    train_pairs = window_starts(train_flights, horizon, stride)
+    val_pairs = window_starts(val_flights, horizon, stride)
     print(
         f"{name:10s}  {horizon} steps  stride {stride}  "
         f"train {len(train_pairs)}  val {len(val_pairs)}  "

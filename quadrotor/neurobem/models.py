@@ -6,7 +6,7 @@ from pathlib import Path
 
 import torch
 
-from quadrotor.fit import load_or_train_symmetric
+from quadrotor.neurobem.fit import load_or_train_symmetric
 from quadrotor.neurobem.data import HORIZON_STEPS, load_neurobem_prepared
 
 CHECKPOINT_DIR = Path(__file__).resolve().parent / "out" / "parity18k"
@@ -34,7 +34,6 @@ def load_or_train(
         horizon=HORIZON_STEPS,
         warm_start=True,
         warm_steps=20,
-        include_voltage=False,
         name="symmetric",
     )
     return (train, val, test), model, history

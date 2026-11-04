@@ -23,16 +23,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from quadrotor.fit import SymmetricModel, n_params, train_device
+from quadrotor.geometry import _features, _so3_exp, _so3_log, module_device, prime_hidden, train_device
 from quadrotor.neurobem.data import load_neurobem_prepared
-from quadrotor.train import (
-    _configure_input_normalization,
-    _features,
-    _so3_exp,
-    _so3_log,
-    module_device,
-    prime_hidden,
-)
+from quadrotor.neurobem.fit import SymmetricModel, n_params
+from quadrotor.neurobem.openloop import _configure_input_normalization
 
 OUT = Path(__file__).resolve().parent / "out" / "nyu_decoupled18k"
 EVERY = 4
@@ -49,7 +43,7 @@ LR = 1e-3
 def at_100hz(flight):
     n = (flight.n_steps // EVERY) * EVERY
     if n < EVERY * (HISTORY + EVAL_H):
-        return replace(flight, pwm=flight.pwm[:0], dt=flight.dt[:0])
+        return replace(flight, motors=flight.motors[:0], dt=flight.dt[:0])
     sl = slice(0, n, EVERY)
     return replace(
         flight,
@@ -57,8 +51,7 @@ def at_100hz(flight):
         rotation=flight.rotation[: n + 1 : EVERY],
         velocity_world=flight.velocity_world[: n + 1 : EVERY],
         omega_body=flight.omega_body[: n + 1 : EVERY],
-        pwm=flight.pwm[sl],
-        voltage=flight.voltage[sl],
+        motors=flight.motors[sl],
         dt=flight.dt[:n].reshape(-1, EVERY).sum(axis=1).astype(np.float32),
     )
 
@@ -77,18 +70,18 @@ def windows(flights, horizon: int, stride: int) -> list[tuple[int, int]]:
 
 
 def tensors(flights, batch, horizon: int, device: torch.device):
-    pwm, dt, p, r, v, w = [], [], [], [], [], []
+    motors, dt, p, r, v, w = [], [], [], [], [], []
     for fi, s in batch:
         f = flights[fi]
         stop = s + horizon
-        pwm.append(f.pwm[s:stop])
+        motors.append(f.motors[s:stop])
         dt.append(f.dt[s:stop])
         p.append(f.position[s : stop + 1])
         r.append(f.rotation[s : stop + 1])
         v.append(f.velocity_world[s : stop + 1])
         w.append(f.omega_body[s : stop + 1])
     return (
-        torch.as_tensor(np.stack(pwm), device=device),
+        torch.as_tensor(np.stack(motors), device=device),
         torch.as_tensor(np.stack(dt), device=device),
         torch.as_tensor(np.stack(p), device=device),
         torch.as_tensor(np.stack(r), device=device),
@@ -97,12 +90,12 @@ def tensors(flights, batch, horizon: int, device: torch.device):
     )
 
 
-def roll_velocity(model, pwm, dt, r_gt, v, w, hidden):
+def roll_velocity(model, motors, dt, r_gt, v, w, hidden):
     vs, ws = [], []
     dummy = v.new_zeros(v.shape[0], 3)
-    for t in range(pwm.shape[1]):
+    for t in range(motors.shape[1]):
         rot = r_gt[:, t]
-        acc, hidden = model.step(_features(model, dummy, rot, v, w, pwm[:, t]), hidden)
+        acc, hidden = model.step(_features(model, dummy, rot, v, w, motors[:, t]), hidden)
         step = dt[:, t].unsqueeze(-1)
         v = v + torch.bmm(rot, acc[:, 0:3].unsqueeze(-1)).squeeze(-1) * step
         w = w + acc[:, 3:6] * step
@@ -111,12 +104,12 @@ def roll_velocity(model, pwm, dt, r_gt, v, w, hidden):
     return torch.stack(vs, 1), torch.stack(ws, 1)
 
 
-def roll_attitude(model, pwm, dt, r, v_gt, w_gt, hidden):
+def roll_attitude(model, motors, dt, r, v_gt, w_gt, hidden):
     rs = []
     dummy = r.new_zeros(r.shape[0], 3)
-    for t in range(pwm.shape[1]):
+    for t in range(motors.shape[1]):
         acc, hidden = model.step(
-            _features(model, dummy, r, v_gt[:, t], w_gt[:, t], pwm[:, t]), hidden
+            _features(model, dummy, r, v_gt[:, t], w_gt[:, t], motors[:, t]), hidden
         )
         step = dt[:, t].unsqueeze(-1)
         phi = (w_gt[:, t] + 0.5 * acc[:, 3:6] * step) * step
@@ -136,12 +129,12 @@ def score(vel, att, flights, horizon: int = EVAL_H, stride: int = EVAL_STRIDE) -
     att.eval()
     for offset in range(0, len(pairs), BATCH):
         batch = pairs[offset : offset + BATCH]
-        pwm, dt, _p, r, v, w = tensors(flights, batch, horizon, device)
+        motors, dt, _p, r, v, w = tensors(flights, batch, horizon, device)
         v_hat, w_hat = roll_velocity(
-            vel, pwm, dt, r, v[:, 0], w[:, 0], prime_hidden(vel, flights, batch, HISTORY)
+            vel, motors, dt, r, v[:, 0], w[:, 0], prime_hidden(vel, flights, batch, HISTORY)
         )
         r_hat = roll_attitude(
-            att, pwm, dt, r[:, 0], v, w, prime_hidden(att, flights, batch, HISTORY)
+            att, motors, dt, r[:, 0], v, w, prime_hidden(att, flights, batch, HISTORY)
         )
         vel_sq = (v_hat - v[:, 1:]).square().sum(-1) + (w_hat - w[:, 1:]).square().sum(-1)
         rel = torch.matmul(r[:, 1:].transpose(-1, -2), r_hat)
@@ -164,13 +157,13 @@ def train_head(name, model, flights, pairs, kind: str) -> None:
         seen = 0
         for offset in range(0, len(order), BATCH):
             batch = [pairs[i] for i in order[offset : offset + BATCH]]
-            pwm, dt, _p, r, v, w = tensors(flights, batch, TRAIN_H, device)
+            motors, dt, _p, r, v, w = tensors(flights, batch, TRAIN_H, device)
             hidden = prime_hidden(model, flights, batch, HISTORY)
             if kind == "vel":
-                v_hat, w_hat = roll_velocity(model, pwm, dt, r, v[:, 0], w[:, 0], hidden)
+                v_hat, w_hat = roll_velocity(model, motors, dt, r, v[:, 0], w[:, 0], hidden)
                 loss = (v_hat - v[:, 1:]).square().mean() + (w_hat - w[:, 1:]).square().mean()
             else:
-                r_hat = roll_attitude(model, pwm, dt, r[:, 0], v, w, hidden)
+                r_hat = roll_attitude(model, motors, dt, r[:, 0], v, w, hidden)
                 rel = torch.matmul(r[:, 1:].transpose(-1, -2), r_hat)
                 loss = _so3_log(rel.reshape(-1, 3, 3)).square().mean()
             opt.zero_grad(set_to_none=True)
@@ -204,8 +197,8 @@ def main() -> None:
         flush=True,
     )
 
-    vel = SymmetricModel(include_voltage=False).to(device)
-    att = SymmetricModel(include_voltage=False).to(device)
+    vel = SymmetricModel().to(device)
+    att = SymmetricModel().to(device)
     _configure_input_normalization(vel, train)
     att.load_state_dict(vel.state_dict())
     print(f"vel {n_params(vel):,}   att {n_params(att):,}   total {n_params(vel)+n_params(att):,}", flush=True)

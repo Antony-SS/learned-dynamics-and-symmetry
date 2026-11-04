@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from quadrotor.evaluate import benchmark_mae
-from quadrotor.fit import SymmetricModel, unpack_state
+from quadrotor.neurobem.fit import SymmetricModel, unpack_state
 from quadrotor.neurobem.data import HORIZON_STEPS, load_neurobem_prepared
 
 CKPT = Path(__file__).resolve().parent / "out" / "parity18k" / "symmetric.pt"
@@ -45,7 +45,7 @@ def main() -> None:
     if not CKPT.is_file():
         raise SystemExit("no GRU checkpoint yet")
     payload = torch.load(CKPT, map_location="cpu", weights_only=False)
-    model = SymmetricModel(include_voltage=False)
+    model = SymmetricModel()
     model.load_state_dict(unpack_state(payload))
     model.eval()
     history = payload.get("history", []) if isinstance(payload, dict) else []

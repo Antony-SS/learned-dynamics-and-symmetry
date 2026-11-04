@@ -1,4 +1,4 @@
-"""Prepared state for the NanoBench system-identification rollout.
+"""Prepared flight tensors shared by the Crazyflie loaders.
 
 Each window is initialized once from Vicon. Thereafter the network propagates
 position, attitude, linear velocity, and angular velocity without reading
@@ -9,10 +9,9 @@ initial Vicon attitude.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
-
-from quadrotor.data import Flight, load_data_rich_split, load_split
 
 DT = 0.01
 HORIZON_STEPS = 50
@@ -71,7 +70,7 @@ class PreparedFlight:
         return int(self.pwm.shape[0])
 
 
-def orientation(flight: Flight) -> tuple[np.ndarray, str]:
+def orientation(flight: Any) -> tuple[np.ndarray, str]:
     """Rotation matrices and which sensor they came from."""
     if np.isfinite(flight.rotation).all():
         return flight.rotation, "vicon"
@@ -80,7 +79,7 @@ def orientation(flight: Flight) -> tuple[np.ndarray, str]:
     raise ValueError(f"{flight.name} has no finite Vicon or EKF attitude")
 
 
-def prepare(flight: Flight) -> PreparedFlight:
+def prepare(flight: Any) -> PreparedFlight:
     rotation, source = orientation(flight)
     position = np.asarray(flight.position, dtype=np.float32)
     rotation = np.asarray(rotation, dtype=np.float32)
@@ -107,18 +106,3 @@ def prepare(flight: Flight) -> PreparedFlight:
     )
 
 
-def load_prepared(
-    root: str | None = None,
-    *,
-    data_rich: bool = False,
-    seed: int = 0,
-) -> tuple[list[PreparedFlight], list[PreparedFlight], list[PreparedFlight]]:
-    if data_rich:
-        train, validation, test = load_data_rich_split(root, seed=seed)
-    else:
-        train, validation, test = load_split(root)
-    return (
-        [prepare(flight) for flight in train],
-        [prepare(flight) for flight in validation],
-        [prepare(flight) for flight in test],
-    )

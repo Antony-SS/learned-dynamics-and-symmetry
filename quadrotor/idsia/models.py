@@ -1,391 +1,283 @@
-"""IDSIA models we train: naive, canonical, symmetric, physics + symmetric GRU.
+"""The three IDSIA models we train.
 
-Naive and canonical are an unconstrained GRU sized to the parity net (~18k).
-Symmetric and the residual on frozen IDSIA physics are ``ParityMotorNet``
-with ``hidden_per_type=24`` (17,977 weights): one pass, both airframe axes.
+QuadDynamicsNet: delay-line MLP on the 13-D quotient → body (a, α), then kinematics.
+PhysQuotient: frozen Crazyflie RK4 + 12-D residual that reads the quotient only.
+PhysQuotientSym: same physics, body-frame residual with Z₂×Z₂ orbit.
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import torch
+import torch.nn as nn
 
-from quadrotor.canonical import PreparedFlight, absolute_dim, canonical_dim, output_dim
-from quadrotor.idsia.baselines import PhysQuadModel
-from quadrotor.sequence import ParityMotorNet
-from quadrotor.train import _features, _so3_exp, _so3_log, train_open_loop
+from quadrotor.idsia.baselines import BaseQuadModel, PhysQuadModel, ResidualQuadModel
+from quadrotor.train import _apply, _features, _so3_exp, _so3_log
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-CHECKPOINT_DIR = REPO_ROOT / "runs" / "idsia_parity18k"
-INCLUDE_VOLTAGE = False
-PARITY_WIDTH = 24
-PLAIN_HIDDEN = 60
-EPOCHS = 20
-OURS = ("naive", "canonical", "symmetric", "phys_sym_gru")
+HISTORY = 10
+HIDDEN = 64
+
+_ORBIT_GV = (
+    (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+    (1.0, -1.0, 1.0, 1.0, -1.0, 1.0),
+    (-1.0, 1.0, 1.0, -1.0, 1.0, 1.0),
+    (-1.0, -1.0, 1.0, -1.0, -1.0, 1.0),
+)
+_ORBIT_W = (
+    (1.0, 1.0, 1.0),
+    (-1.0, 1.0, -1.0),
+    (1.0, -1.0, -1.0),
+    (-1.0, -1.0, 1.0),
+)
+_ORBIT_PWM = ((0, 1, 2, 3), (3, 2, 1, 0), (1, 0, 3, 2), (2, 3, 0, 1))
+_ORBIT_ACC = (
+    (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+    (1.0, -1.0, 1.0, -1.0, 1.0, -1.0),
+    (-1.0, 1.0, 1.0, 1.0, -1.0, -1.0),
+    (-1.0, -1.0, 1.0, -1.0, -1.0, 1.0),
+)
 
 
-class PlainGRU(torch.nn.Module):
-    """Unconstrained GRU + MLP head, ~18k weights. No airframe symmetry."""
+def _mlp(in_dim: int, hidden: int, n_hidden: int, out_dim: int) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    dim = int(in_dim)
+    for _ in range(int(n_hidden)):
+        layers += [nn.Linear(dim, hidden), nn.ReLU()]
+        dim = int(hidden)
+    layers.append(nn.Linear(dim, out_dim))
+    return nn.Sequential(*layers)
+
+
+def quotient(rotation: torch.Tensor, velocity_world: torch.Tensor, omega: torch.Tensor, pwm: torch.Tensor) -> torch.Tensor:
+    dummy = type("M", (), {"reads_pose": False, "reads_voltage": False, "reads_height": False})()
+    return _features(dummy, None, rotation, velocity_world, omega, pwm, None)
+
+
+class QuadDynamicsNet(nn.Module):
+    """Stacked quotient frames → body linear and angular acceleration.
+
+    Optional Z₂×Z₂ orbit average (default on). Integrator is kinematics only.
+    """
 
     reads_pose = False
-    mirror = False
+    reads_voltage = False
+    reads_height = False
+    family = "quad_dynamics"
 
-    def __init__(self, in_dim: int, hidden_dim: int = PLAIN_HIDDEN) -> None:
+    def __init__(self, symmetric: bool = True, hidden: int = HIDDEN, n_hidden: int = 2) -> None:
         super().__init__()
-        self.hidden_dim = int(hidden_dim)
-        self.gru = torch.nn.GRUCell(in_dim, self.hidden_dim)
-        self.trunk = torch.nn.Sequential(
-            torch.nn.Linear(self.hidden_dim, self.hidden_dim),
-            torch.nn.ReLU(),
-        )
-        self.head = torch.nn.Linear(self.hidden_dim, output_dim())
-        torch.nn.init.zeros_(self.head.weight)
-        torch.nn.init.zeros_(self.head.bias)
-        self.register_buffer("input_center", torch.zeros(in_dim, dtype=torch.float32))
-        self.register_buffer("input_scale", torch.ones(in_dim, dtype=torch.float32))
-        self.register_buffer(
-            "acceleration_limit",
-            torch.tensor((40.0, 40.0, 40.0, 400.0, 400.0, 400.0), dtype=torch.float32),
-        )
+        self.history = HISTORY
+        self.hidden = int(hidden)
+        self.n_hidden = int(n_hidden)
+        self.symmetric = bool(symmetric)
+        self.net = _mlp(13 * self.history, self.hidden, self.n_hidden, 6)
+        self.register_buffer("x_mean", torch.zeros(13))
+        self.register_buffer("x_scale", torch.ones(13))
+        self.register_buffer("orbit_gv", torch.tensor(_ORBIT_GV, dtype=torch.float32))
+        self.register_buffer("orbit_w", torch.tensor(_ORBIT_W, dtype=torch.float32))
+        self.register_buffer("orbit_pwm", torch.tensor(_ORBIT_PWM, dtype=torch.long))
+        self.register_buffer("orbit_acc", torch.tensor(_ORBIT_ACC, dtype=torch.float32))
 
-    def set_input_normalization(self, center: torch.Tensor, scale: torch.Tensor) -> None:
-        if center.shape != self.input_center.shape or scale.shape != self.input_scale.shape:
-            raise ValueError(
-                f"normalization must have shape {tuple(self.input_center.shape)}"
-            )
+    def set_stats(self, mean: torch.Tensor, scale: torch.Tensor) -> None:
         with torch.no_grad():
-            self.input_center.copy_(center.to(self.input_center))
-            self.input_scale.copy_(scale.to(self.input_scale).clamp_min(1e-6))
+            self.x_mean.copy_(mean.reshape(13).to(self.x_mean))
+            self.x_scale.copy_(scale.reshape(13).to(self.x_scale).clamp_min(1e-6))
+
+    def _predict(self, stacked: torch.Tensor) -> torch.Tensor:
+        if not self.symmetric:
+            return self.net(stacked)
+        batch = stacked.shape[0]
+        slots = stacked.reshape(batch, self.history, 13)
+        pwm = slots[..., 9:13]
+        index = self.orbit_pwm.view(4, 1, 1, 4).expand(4, batch, self.history, 4)
+        orbit = torch.cat(
+            (
+                slots[..., 0:6].unsqueeze(0) * self.orbit_gv.view(4, 1, 1, 6),
+                slots[..., 6:9].unsqueeze(0) * self.orbit_w.view(4, 1, 1, 3),
+                pwm.unsqueeze(0).expand(4, -1, -1, -1).gather(-1, index),
+            ),
+            dim=-1,
+        )
+        raw = self.net(orbit.reshape(4 * batch, -1)).reshape(4, batch, 6)
+        return (raw * self.orbit_acc.unsqueeze(1)).sum(0) / 4.0
+
+    def forward(self, stacked: torch.Tensor) -> torch.Tensor:
+        return self._predict(stacked)
 
     def initial_hidden(self, batch_size: int, reference: torch.Tensor) -> torch.Tensor:
-        return reference.new_zeros(batch_size, self.hidden_dim)
+        return reference.new_zeros(batch_size, self.history, 13)
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        hidden = self.initial_hidden(features.shape[0], features)
-        acceleration, _ = self.step(features, hidden)
-        return acceleration
+    def step(self, features: torch.Tensor, hidden: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        buf = torch.cat((hidden[:, 1:], features.unsqueeze(1)), dim=1)
+        flat = ((buf - self.x_mean) / self.x_scale).reshape(buf.shape[0], -1)
+        return self._predict(flat), buf
 
-    def _plain_step(
-        self, features: torch.Tensor, hidden: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        normalized = (features - self.input_center) / self.input_scale
-        hidden = self.gru(normalized, hidden)
-        acceleration = torch.tanh(self.head(self.trunk(hidden)))
-        return acceleration * self.acceleration_limit, hidden
-
-    def step(
-        self, features: torch.Tensor, hidden: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self._plain_step(features, hidden)
+    def advance(self, p, r, v_w, w, pwm, dt, hidden):
+        feat = quotient(r, v_w, w, pwm)
+        acc, hidden = self.step(feat, hidden)
+        p, r, v_w, w = _apply(p, r, v_w, w, acc, dt)
+        return p, r, v_w, w, hidden
 
 
-class NaiveModel(PlainGRU):
-    reads_pose = True
+class PhysQuotient(BaseQuadModel):
+    """Frozen IDSIA physics + 12-D residual on the 13-D quotient (no p, no yaw)."""
 
-    def __init__(self) -> None:
-        super().__init__(absolute_dim(INCLUDE_VOLTAGE))
-
-
-class CanonicalModel(PlainGRU):
-    def __init__(self) -> None:
-        super().__init__(canonical_dim(INCLUDE_VOLTAGE))
-
-
-class SymmetricModel(ParityMotorNet):
-    def __init__(self) -> None:
-        super().__init__(
-            canonical_dim(INCLUDE_VOLTAGE),
-            output_dim(),
-            hidden_per_type=PARITY_WIDTH,
-        )
-
-
-class LongitudinalModel(PlainGRU):
-    """Same ~18k GRU, orbit-averaged over the longitudinal (left-right) mirror.
-
-    Front-back is not imposed. Hidden state is two copies: identity and LR.
-    """
-
-    longitudinal_mirror = True
-
-    def __init__(self) -> None:
-        super().__init__(canonical_dim(INCLUDE_VOLTAGE))
-
-    def initial_hidden(self, batch_size: int, reference: torch.Tensor) -> torch.Tensor:
-        return reference.new_zeros(batch_size, 2, self.hidden_dim)
-
-    def step(
-        self, features: torch.Tensor, hidden: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        from quadrotor.sequence import _mirror_acceleration, _mirror_features
-
-        first, hidden_first = self._plain_step(features, hidden[:, 0])
-        mirrored, hidden_mirror = self._plain_step(
-            _mirror_features(features, "lr"), hidden[:, 1]
-        )
-        mirrored = _mirror_acceleration(mirrored, "lr")
-        return 0.5 * (first + mirrored), torch.stack((hidden_first, hidden_mirror), dim=1)
-
-
-class SymmetricHoldModel(SymmetricModel):
-    """Previous twist plus a symmetric residual, then SE(3) from the new twist.
-
-    ``ν_{k+1} = ν_k + f_θ(ν_k, u_k)``. Pose is integrated with ``ν_{k+1}``.
-    There is no velocity command to anchor to, so the previous Vicon/predicted
-    twist plays that role. Zero ``f_θ`` coasts.
-    """
-
-    def advance(
-        self,
-        position: torch.Tensor,
-        rotation: torch.Tensor,
-        velocity_world: torch.Tensor,
-        omega_body: torch.Tensor,
-        pwm: torch.Tensor,
-        dt: torch.Tensor,
-        hidden: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        features = _features(self, position, rotation, velocity_world, omega_body, pwm)
-        residual, hidden = self.step(features, hidden)
-        step = dt.reshape(-1, 1)
-        delta_v = torch.bmm(
-            rotation, (residual[:, 0:3] * step).unsqueeze(-1)
-        ).squeeze(-1)
-        velocity_world = velocity_world + delta_v
-        omega_body = omega_body + residual[:, 3:6] * step
-        position = position + velocity_world * step
-        rotation = torch.bmm(rotation, _so3_exp(omega_body * step))
-        return position, rotation, velocity_world, omega_body, hidden
-
-
-class SymmetricZModel(ParityMotorNet):
-    """Same one-pass airframe symmetry, plus world z for ground effect."""
-
-    reads_height = True
-
-    def __init__(self) -> None:
-        super().__init__(
-            canonical_dim(INCLUDE_VOLTAGE) + 1,
-            output_dim(),
-            hidden_per_type=PARITY_WIDTH,
-        )
-
-
-class PhysSymGRU(torch.nn.Module):
-    """Frozen IDSIA physics plus a one-pass symmetric GRU residual."""
-
-    reads_pose = False
-    mirror = True
+    family = "phys_quotient"
 
     def __init__(self) -> None:
         super().__init__()
         self.phys = PhysQuadModel(zero_omega_dot=True)
-        for parameter in self.phys.parameters():
-            parameter.requires_grad = False
-        self.neural = SymmetricModel()
-        in_dim = canonical_dim(INCLUDE_VOLTAGE)
-        self.register_buffer("input_center", torch.zeros(in_dim, dtype=torch.float32))
-        self.register_buffer("input_scale", torch.ones(in_dim, dtype=torch.float32))
+        self.neural = ResidualQuadModel(state_dim=12, input_dim=1, hidden_dim=64, num_layers=5)
+        self.neural.mlp = nn.Sequential(
+            nn.Linear(13, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+        )
+        self.neural.out = nn.Linear(64, 12)
+        nn.init.zeros_(self.neural.out.weight)
+        nn.init.zeros_(self.neural.out.bias)
+        self.register_buffer("x_mean", torch.zeros(12))
+        self.register_buffer("x_scale", torch.ones(12))
+        self.register_buffer("u_mean", torch.zeros(4))
+        self.register_buffer("u_scale", torch.ones(4))
+        self.register_buffer("canonical_mean", torch.zeros(13))
+        self.register_buffer("canonical_scale", torch.ones(13))
 
-    def set_input_normalization(self, center: torch.Tensor, scale: torch.Tensor) -> None:
-        self.neural.set_input_normalization(center, scale)
+    def x_denorm(self, x_norm: torch.Tensor) -> torch.Tensor:
+        return x_norm * self.x_scale + self.x_mean
+
+    def x_normed(self, x_real: torch.Tensor) -> torch.Tensor:
+        return (x_real - self.x_mean) / self.x_scale
+
+    def _canonical(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        _pos, vel, so3, omega = x.split((3, 3, 3, 3), dim=-1)
+        rotation_t = _so3_exp(so3).transpose(-1, -2)
+        up = x.new_tensor((0.0, 0.0, 1.0)).expand(x.shape[0], 3)
+        gravity_body = torch.bmm(rotation_t, up.unsqueeze(-1)).squeeze(-1)
+        velocity_body = torch.bmm(rotation_t, vel.unsqueeze(-1)).squeeze(-1)
+        return torch.cat((gravity_body, velocity_body, omega, u), dim=-1)
+
+    def one_step(self, x_norm: torch.Tensor, u_norm: torch.Tensor) -> torch.Tensor:
+        x_real = self.x_denorm(x_norm)
+        u_mot = u_norm * self.u_scale + self.u_mean
         with torch.no_grad():
-            self.input_center.copy_(center.to(self.input_center))
-            self.input_scale.copy_(scale.to(self.input_scale).clamp_min(1e-6))
+            x_phys_next = self.x_normed(self.phys.one_step(x_real, u_mot))
+        canon = (self._canonical(x_real, u_mot) - self.canonical_mean) / self.canonical_scale
+        dx = self.neural.out(self.neural.mlp(canon))
+        x_next = x_phys_next + dx
+        if not torch.all(torch.isfinite(x_next)):
+            return x_phys_next
+        return x_next
 
-    def initial_hidden(self, batch_size: int, reference: torch.Tensor) -> torch.Tensor:
-        return self.neural.initial_hidden(batch_size, reference)
+    def step_real(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        u_n = (u - self.u_mean) / self.u_scale
+        return self.x_denorm(self.one_step(self.x_normed(x), u_n))
 
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        return self.neural(features)
 
-    def step(
-        self, features: torch.Tensor, hidden: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.neural.step(features, hidden)
+class SymmetricResidual(nn.Module):
+    """13-D quotient → body (Δp, Δv, Δθ, Δω), Reynolds-averaged over four mirrors."""
 
-    def advance(
-        self,
-        position: torch.Tensor,
-        rotation: torch.Tensor,
-        velocity_world: torch.Tensor,
-        omega_body: torch.Tensor,
-        pwm: torch.Tensor,
-        dt: torch.Tensor,
-        hidden: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        state = torch.cat((position, velocity_world, _so3_log(rotation), omega_body), dim=-1)
-        with torch.no_grad():
-            next_state = self.phys.one_step(state, pwm)
-        pos_p, vel_p, so3_p, omega_p = next_state.split((3, 3, 3, 3), dim=-1)
-        rotation_p = _so3_exp(so3_p)
-        up = rotation.new_tensor((0.0, 0.0, 1.0)).expand(rotation.shape[0], 3)
-        rotation_t = rotation.transpose(1, 2)
-        features = torch.cat(
+    def __init__(self, hidden_dim: int = 64, num_layers: int = 5) -> None:
+        super().__init__()
+        layers: list[nn.Module] = []
+        for index in range(num_layers):
+            layers += [nn.Linear(13 if index == 0 else hidden_dim, hidden_dim), nn.ReLU()]
+        self.mlp = nn.Sequential(*layers)
+        self.out = nn.Linear(hidden_dim, 12)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+        self.register_buffer("orbit_gv", torch.tensor(_ORBIT_GV, dtype=torch.float32))
+        self.register_buffer("orbit_w", torch.tensor(_ORBIT_W, dtype=torch.float32))
+        self.register_buffer("orbit_pwm", torch.tensor(_ORBIT_PWM, dtype=torch.long))
+        self.register_buffer(
+            "orbit_polar",
+            torch.tensor(
+                ((1.0, 1.0, 1.0), (1.0, -1.0, 1.0), (-1.0, 1.0, 1.0), (-1.0, -1.0, 1.0)),
+                dtype=torch.float32,
+            ),
+        )
+        self.register_buffer(
+            "orbit_axial",
+            torch.tensor(
+                ((1.0, 1.0, 1.0), (-1.0, 1.0, -1.0), (1.0, -1.0, -1.0), (-1.0, -1.0, 1.0)),
+                dtype=torch.float32,
+            ),
+        )
+
+    def body_dx(self, canonical: torch.Tensor) -> torch.Tensor:
+        batch = canonical.shape[0]
+        pwm = canonical[:, 9:13]
+        index = self.orbit_pwm.view(4, 1, 4).expand(4, batch, 4)
+        orbit = torch.cat(
             (
-                torch.bmm(rotation_t, up.unsqueeze(-1)).squeeze(-1),
-                torch.bmm(rotation_t, velocity_world.unsqueeze(-1)).squeeze(-1),
-                omega_body,
-                pwm,
+                canonical[:, 0:6].unsqueeze(0) * self.orbit_gv.view(4, 1, 6),
+                canonical[:, 6:9].unsqueeze(0) * self.orbit_w.view(4, 1, 3),
+                pwm.unsqueeze(0).expand(4, -1, -1).gather(-1, index),
             ),
             dim=-1,
         )
-        acceleration, hidden = self.neural.step(features, hidden)
-        step = dt.reshape(-1, 1)
-        delta_pos = torch.bmm(
-            rotation, (0.5 * acceleration[:, 0:3] * step.square()).unsqueeze(-1)
-        ).squeeze(-1)
-        delta_vel = torch.bmm(
-            rotation, (acceleration[:, 0:3] * step).unsqueeze(-1)
-        ).squeeze(-1)
-        delta_omega = acceleration[:, 3:6] * step
-        delta_rot = acceleration[:, 3:6] * step.square() * 0.5
-        return (
-            pos_p + delta_pos,
-            torch.bmm(rotation_p, _so3_exp(delta_rot)),
-            vel_p + delta_vel,
-            omega_p + delta_omega,
-            hidden,
+        raw = self.out(self.mlp(orbit.reshape(4 * batch, 13))).reshape(4, batch, 12)
+        polar = self.orbit_polar.view(4, 1, 3)
+        axial = self.orbit_axial.view(4, 1, 3)
+        signed = torch.cat(
+            (
+                raw[..., 0:3] * polar,
+                raw[..., 3:6] * polar,
+                raw[..., 6:9] * axial,
+                raw[..., 9:12] * axial,
+            ),
+            dim=-1,
         )
+        return signed.mean(dim=0)
 
 
-def _empty(name: str) -> torch.nn.Module:
-    if name == "naive":
-        return NaiveModel()
-    if name == "canonical":
-        return CanonicalModel()
-    if name == "symmetric":
-        return SymmetricModel()
-    if name == "longitudinal":
-        return LongitudinalModel()
-    if name == "phys_sym_gru":
-        return PhysSymGRU()
-    raise KeyError(name)
+class PhysQuotientSym(BaseQuadModel):
+    """Frozen IDSIA physics + body 12-D residual with Z₂×Z₂ orbit."""
+
+    family = "phys_quotient_sym"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.phys = PhysQuadModel(zero_omega_dot=True)
+        self.neural = SymmetricResidual(hidden_dim=64, num_layers=5)
+        self.register_buffer("canonical_mean", torch.zeros(13))
+        self.register_buffer("canonical_scale", torch.ones(13))
+
+    def _canonical(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        _pos, vel, so3, omega = x.split((3, 3, 3, 3), dim=-1)
+        rotation = _so3_exp(so3)
+        rotation_t = rotation.transpose(-1, -2)
+        up = x.new_tensor((0.0, 0.0, 1.0)).expand(x.shape[0], 3)
+        gravity_body = torch.bmm(rotation_t, up.unsqueeze(-1)).squeeze(-1)
+        velocity_body = torch.bmm(rotation_t, vel.unsqueeze(-1)).squeeze(-1)
+        return torch.cat((gravity_body, velocity_body, omega, u), dim=-1)
+
+    def one_step(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            x_phys = self.phys.one_step(x, u)
+        canonical = (self._canonical(x, u) - self.canonical_mean) / self.canonical_scale
+        dx_body = self.neural.body_dx(canonical)
+        delta_pos, delta_vel, delta_rot, delta_omega = dx_body.split((3, 3, 3, 3), dim=-1)
+        pos_p, vel_p, so3_p, omega_p = x_phys.split((3, 3, 3, 3), dim=-1)
+        rotation = _so3_exp(x[:, 6:9])
+        pos_next = pos_p + torch.bmm(rotation, delta_pos.unsqueeze(-1)).squeeze(-1)
+        vel_next = vel_p + torch.bmm(rotation, delta_vel.unsqueeze(-1)).squeeze(-1)
+        rotation_next = torch.bmm(_so3_exp(so3_p), _so3_exp(delta_rot))
+        omega_next = omega_p + delta_omega
+        return torch.cat((pos_next, vel_next, _so3_log(rotation_next), omega_next), dim=-1)
 
 
-def n_params(model: torch.nn.Module) -> int:
-    return sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad)
-
-
-def _train_device(requested: str | torch.device) -> torch.device:
-    requested = torch.device(requested)
-    if requested.type == "cpu" and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return requested
-
-
-def _checkpoint_path(name: str, folder: Path) -> Path:
-    return folder / f"{name}.pt"
-
-
-def _history_path(folder: Path) -> Path:
-    return folder / "results.json"
-
-
-def load_ours(
-    folder: str | Path | None = None,
-    device: str | torch.device = "cpu",
-) -> tuple[dict[str, torch.nn.Module], dict[str, list[dict]]]:
-    folder = CHECKPOINT_DIR if folder is None else Path(folder)
-    histories: dict[str, list[dict]] = {}
-    summary = _history_path(folder)
-    if summary.is_file():
-        blob = json.loads(summary.read_text())
-        for name, record in blob.get("models", {}).items():
-            histories[name] = record.get("history", [])
-    loaded: dict[str, torch.nn.Module] = {}
-    for name in OURS:
-        path = _checkpoint_path(name, folder)
-        if not path.is_file():
-            raise FileNotFoundError(path)
-        model = _empty(name)
-        payload = torch.load(path, map_location=device, weights_only=False)
-        state = payload["state"] if isinstance(payload, dict) and "state" in payload else payload
-        model.load_state_dict(state)
-        model.to(device)
-        model.eval()
-        loaded[name] = model
-        if name not in histories and isinstance(payload, dict):
-            histories[name] = payload.get("history", [])
-    return loaded, histories
-
-
-def load_or_train_ours(
-    train_flights: list[PreparedFlight],
-    val_flights: list[PreparedFlight],
-    test_flights: list[PreparedFlight],
-    *,
-    device: str | torch.device = "cpu",
-    epochs: int = EPOCHS,
-    folder: str | Path | None = None,
-) -> tuple[dict[str, torch.nn.Module], dict[str, list[dict]]]:
-    """Load the four IDSIA nets we train, or fit any that are missing."""
-    folder = CHECKPOINT_DIR if folder is None else Path(folder)
-    folder.mkdir(parents=True, exist_ok=True)
-    train_device = _train_device(device)
-    models: dict[str, torch.nn.Module] = {}
-    histories: dict[str, list[dict]] = {}
-    summary: dict = {"models": {}}
-    if _history_path(folder).is_file():
-        summary = json.loads(_history_path(folder).read_text())
-
-    for name in OURS:
-        path = _checkpoint_path(name, folder)
-        model = _empty(name)
-        if path.is_file():
-            payload = torch.load(path, map_location=device, weights_only=False)
-            state = payload["state"] if isinstance(payload, dict) and "state" in payload else payload
-            model.load_state_dict(state)
-            model.to(device)
-            model.eval()
-            history = []
-            if isinstance(payload, dict):
-                history = payload.get("history", [])
-            if not history:
-                history = summary.get("models", {}).get(name, {}).get("history", [])
-            print(f"loaded {name:13s}  params {n_params(model)}  from {path}")
-        else:
-            print(
-                f"training {name:13s}  params {n_params(model)}  "
-                f"on {train_device}  -> {path}",
-                flush=True,
-            )
-            torch.manual_seed(0)
-            model.to(train_device)
-            result = train_open_loop(
-                model,
-                train_flights,
-                val_flights,
-                test_flights,
-                epochs=epochs,
-                lr=1e-3,
-                rollout_every=5,
-                batch_size=256,
-                stride=1,
-                horizon=50,
-                horizon_weight=0.0,
-                name=name,
-            )
-            history = result.history
-            payload = {
-                "state": {key: value.detach().cpu() for key, value in model.state_dict().items()},
-                "history": history,
-                "best_epoch": result.best_epoch,
-                "best_error": result.best_error,
-                "parameters": n_params(model),
-            }
-            torch.save(payload, path)
-            model.to(device)
-            model.eval()
-            summary.setdefault("models", {})[name] = {
-                "parameters": n_params(model),
-                "best_epoch": result.best_epoch,
-                "best_error": result.best_error,
-                "history": history,
-            }
-            _history_path(folder).write_text(json.dumps(summary, indent=2))
-        models[name] = model
-        histories[name] = history
-    return models, histories
+def make_model(family: str, symmetric: bool = True) -> nn.Module:
+    if family == "quad_dynamics":
+        return QuadDynamicsNet(symmetric=symmetric)
+    if family == "phys_quotient":
+        return PhysQuotient()
+    if family == "phys_quotient_sym":
+        return PhysQuotientSym()
+    raise ValueError(f"unknown family {family}")

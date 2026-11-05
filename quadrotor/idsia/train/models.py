@@ -15,7 +15,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from quadrotor.idsia.baselines import BaseQuadModel, PhysQuadModel
+from quadrotor.idsia.baselines.published import BaseQuadModel, PhysQuadModel
 from quadrotor.symmetry import Orbit, Quotient, WorldFeatures, apply_body_dx, quotient
 
 HIDDEN = 64

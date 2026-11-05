@@ -18,9 +18,9 @@ import torch
 import torch.nn.functional as F
 
 from quadrotor.flight import PreparedFlight
-from quadrotor.idsia.idsia_training_reproduction_params import HORIZON
+from quadrotor.idsia.utils.idsia_training_reproduction_params import HORIZON
 from quadrotor.geometry import so3_log_batch
-from quadrotor.idsia.data import DEFAULT_ROOT
+from quadrotor.idsia.data.load import DEFAULT_ROOT
 from quadrotor.geometry import _so3_exp, _so3_log
 
 DT = 0.01

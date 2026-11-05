@@ -21,7 +21,7 @@ WEIGHT_LAMBDA = 0.1
 HS = (0, 9, 49)
 KEYS = ("position", "rotation", "velocity", "omega")
 
-OUT = Path(__file__).resolve().parent / "out"
+OUT = Path(__file__).resolve().parents[1] / "out"
 RUNS = OUT / "runs"
 EVAL = OUT / "eval"
 

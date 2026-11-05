@@ -9,10 +9,10 @@ import numpy as np
 import torch
 
 from quadrotor.geometry import train_device
-from quadrotor.idsia.baselines import _windows, fit_canonical_scalers, fit_scalers, fit_world_scalers
-from quadrotor.idsia.data import load_idsia_prepared
-from quadrotor.idsia.models import make_model
-from quadrotor.idsia.idsia_training_reproduction_params import (
+from quadrotor.idsia.baselines.published import _windows, fit_canonical_scalers, fit_scalers, fit_world_scalers
+from quadrotor.idsia.data.load import load_idsia_prepared
+from quadrotor.idsia.train.models import make_model
+from quadrotor.idsia.utils.idsia_training_reproduction_params import (
     BATCH,
     EPOCHS,
     HORIZON,

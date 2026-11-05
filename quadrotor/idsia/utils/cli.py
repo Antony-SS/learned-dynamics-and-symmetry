@@ -5,10 +5,10 @@ from __future__ import annotations
 import argparse
 
 from quadrotor.geometry import train_device
-from quadrotor.idsia.data import load_idsia_prepared
-from quadrotor.idsia.evaluate import eval_model, family_summary
-from quadrotor.idsia.idsia_training_reproduction_params import KEYS
-from quadrotor.idsia.train_lib import list_seeds, load_trained, train_family
+from quadrotor.idsia.data.load import load_idsia_prepared
+from quadrotor.idsia.eval.evaluate import eval_model, family_summary
+from quadrotor.idsia.train.lib import list_seeds, load_trained, train_family
+from quadrotor.idsia.utils.idsia_training_reproduction_params import KEYS
 
 
 def _fmt(row: dict[str, list[float]]) -> str:

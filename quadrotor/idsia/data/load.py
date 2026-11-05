@@ -9,8 +9,7 @@ import pandas as pd
 
 from quadrotor.flight import PreparedFlight
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_ROOT = Path(__file__).resolve().parent / "nanodrone-sysid-benchmark"
+DEFAULT_ROOT = Path(__file__).resolve().parents[1] / "nanodrone-sysid-benchmark"
 TRAIN_TRAJECTORIES = ("square", "random", "chirp")
 
 def _quat_xyzw_to_matrix(quat_xyzw: np.ndarray) -> np.ndarray:
@@ -66,7 +65,6 @@ def _load(path: Path) -> PreparedFlight:
         omega_body=values[:, 11:14],
         motors=values[:-1, 14:18],  # m1_rads … m4_rads
         dt=dt,
-        attitude="motion capture",
     )
 
 

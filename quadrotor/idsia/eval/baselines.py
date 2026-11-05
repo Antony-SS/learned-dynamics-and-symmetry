@@ -7,8 +7,8 @@ import argparse
 from quadrotor.geometry import train_device
 from quadrotor.idsia.baselines import load_phys_res, load_physics
 from quadrotor.idsia.data import load_idsia_prepared
-from quadrotor.idsia.evaluate import pack_mae, save_eval
-from quadrotor.idsia.idsia_training_reproduction_params import HORIZON, KEYS
+from quadrotor.idsia.eval.evaluate import pack_mae, save_eval
+from quadrotor.idsia.utils.idsia_training_reproduction_params import HORIZON, KEYS
 from quadrotor.evaluate import benchmark_mae
 
 

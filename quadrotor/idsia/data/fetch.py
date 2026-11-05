@@ -6,7 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from quadrotor.idsia.data import DEFAULT_ROOT
+from quadrotor.idsia.data.load import DEFAULT_ROOT
 
 REMOTE = "https://github.com/idsia-robotics/nanodrone-sysid-benchmark.git"
 

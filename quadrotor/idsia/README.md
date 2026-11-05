@@ -1,8 +1,10 @@
 # IDSIA Crazyflie sys-id
 
-Busetto et al., *Control Engineering Practice* 172 (2026). Official split: Square / Random / Chirp runs 1–3 train, run 4 val, Melon test. Fetch with `python -m quadrotor.idsia.fetch`. Shared kinematics are `quadrotor.geometry`.
+Busetto et al., *Control Engineering Practice* 172 (2026). Official split: Square / Random / Chirp runs 1–3 train, run 4 val, Melon test. Fetch with `python -m quadrotor.idsia.data.fetch`. Shared kinematics are `quadrotor.geometry`.
 
-We train three models with **their recipe** (constants in `idsia_training_reproduction_params.py`: stride 1, 50-step windows, WeightedMSE λ=0.1, Adam 1e-5→1e-8 cosine T=500, 20 epochs, best val):
+Layout: `data/` (clone + CSV loader), `baselines/` (published physics / phys+res), `train/` (leftover families), `eval/` (Melon MAE), `utils/` (recipe constants + CLI).
+
+We train three models with **their recipe** (constants in `utils/idsia_training_reproduction_params.py`: stride 1, 50-step windows, WeightedMSE λ=0.1, Adam 1e-5→1e-8 cosine T=500, 20 epochs, best val):
 
 | family | class | what it is |
 | --- | --- | --- |
@@ -10,14 +12,15 @@ We train three models with **their recipe** (constants in `idsia_training_reprod
 | `phys_quotient` | `PhysQuotient` | same physics + residual on the 13-D quotient (no orbit) |
 | `phys_quotient_sym` | `PhysQuotientSym` | same physics + residual, Reynolds-averaged over Z₂×Z₂ |
 
-Their published physics and phys+res checkpoints are loaded as-is (`test_baselines.py`). Do not retrain them.
+Their published physics and phys+res checkpoints are loaded as-is (`python -m quadrotor.idsia.eval.baselines`). Do not retrain them.
 
 ```bash
-python -m quadrotor.idsia.train_quad_dynamics --seed 0
-python -m quadrotor.idsia.test_quad_dynamics --all
-python -m quadrotor.idsia.test_baselines
+python -m quadrotor.idsia.data.fetch
+python -m quadrotor.idsia.train.quad_dynamics --seed 0
+python -m quadrotor.idsia.eval.quad_dynamics --all
+python -m quadrotor.idsia.eval.baselines
 ```
 
 `--all` trains or evaluates every seed that already has a run dir / checkpoint. Checkpoints: `out/runs/<family>/seed_k/{best.pt,last.pt}`. Melon MAE: `out/eval/<family>/seed_k/{mae.json,predictions.npz}`.
 
-`train.ipynb` trains one seed (resumes `last.pt`). `results.ipynb` prints the Melon table at h=1 / 10 / 50.
+`train/train.ipynb` trains one seed (resumes `last.pt`). `eval/results.ipynb` prints the Melon table at h=1 / 10 / 50.

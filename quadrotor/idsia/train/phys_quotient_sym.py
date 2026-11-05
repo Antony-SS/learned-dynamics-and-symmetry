@@ -1,5 +1,5 @@
-from quadrotor.idsia.cli import train_main
-from quadrotor.idsia.idsia_training_reproduction_params import PHYS_QUOTIENT_SYM
+from quadrotor.idsia.utils.cli import train_main
+from quadrotor.idsia.utils.idsia_training_reproduction_params import PHYS_QUOTIENT_SYM
 
 if __name__ == "__main__":
     train_main(PHYS_QUOTIENT_SYM)

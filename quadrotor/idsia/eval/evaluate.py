@@ -8,8 +8,8 @@ from pathlib import Path
 import numpy as np
 
 from quadrotor.evaluate import benchmark_mae
-from quadrotor.idsia.idsia_training_reproduction_params import EVAL, HORIZON, HS, KEYS, eval_dir
-from quadrotor.idsia.train_lib import write_json
+from quadrotor.idsia.train.lib import write_json
+from quadrotor.idsia.utils.idsia_training_reproduction_params import EVAL, HORIZON, HS, KEYS, eval_dir
 
 
 def pack_mae(mae: dict[str, np.ndarray]) -> dict[str, list[float]]:

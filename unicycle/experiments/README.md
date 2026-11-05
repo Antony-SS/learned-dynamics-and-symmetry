@@ -68,8 +68,9 @@ Quotient leftover, Reynolds-averaged over the two Z₂ elements (identity and le
 python -m unicycle.experiments.train.naive --seed 0
 python -m unicycle.experiments.eval.physics
 python -m unicycle.experiments.eval.naive --all
+python -m unicycle.experiments.interactive
 ```
 
-`--all` evaluates every seed that already has a checkpoint. Checkpoints: `out/runs/<family>/seed_k/{best.pt,last.pt}`. Test metrics: `out/eval/<family>/seed_k/test.json`.
+`--all` evaluates every seed that already has a checkpoint. Checkpoints: `runs/unicycle/<family>/seed_k/{best.pt,last.pt}`. Test metrics: `runs/unicycle/eval/<family>/seed_k/test.json`.
 
-`train/train.ipynb` starts with left/right counts, a commanded (v, ω) heatmap, then stills and gifs of every collection. It trains one seed (resumes `last.pt`). `eval/results.ipynb` prints test position / heading RMSE at 1 s, 5 s, 30 s, and the full log.
+`train/train.ipynb` starts with left/right counts, a commanded (v, ω) heatmap, then stills and gifs of every collection. It trains one seed (resumes `last.pt`). `eval/results.ipynb` prints test position / heading RMSE at 1 s, 5 s, 30 s, and the full log. `python -m unicycle.experiments.interactive` opens a local page: pick a `.pt` under `runs/unicycle/`, pick a collection, scrub the start time, play / stop the open-loop.

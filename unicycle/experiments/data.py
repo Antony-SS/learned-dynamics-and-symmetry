@@ -137,6 +137,19 @@ def _held_out_cut(steps: int) -> int:
     return steps - held
 
 
+def load_all(root: str | Path = DEFAULT_ROOT) -> dict[str, Trajectory]:
+    """Every collection under ``root``, not just the official split."""
+    root = Path(root)
+    paths = sorted(root.glob("*/*.npz"))
+    if not paths:
+        raise FileNotFoundError(f"no Robotarium logs under {root}")
+    found: dict[str, Trajectory] = {}
+    for path in paths:
+        log = load_trajectory(path)
+        found[log.name] = log
+    return found
+
+
 def load_named(root: str | Path = DEFAULT_ROOT) -> dict[str, Trajectory]:
     root = Path(root)
     paths = sorted(root.glob("*/*.npz"))

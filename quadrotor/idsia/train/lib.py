@@ -108,7 +108,7 @@ def train_family(
     best_val = float("inf")
     if last_path.is_file():
         payload = torch.load(last_path, map_location="cpu", weights_only=False)
-        model.load_state_dict(payload["state"], strict=False)
+        model.load_state_dict(adapt_state(payload["state"], model), strict=False)
         opt.load_state_dict(payload["optimizer"])
         sched.load_state_dict(payload["scheduler"])
         curve = list(payload.get("curve", []))
@@ -163,7 +163,7 @@ def train_family(
         print(f"  {family}  seed {seed}  epoch {epoch:02d}  train {train_mean:.6f}  val {val_mean:.6f}{mark}", flush=True)
 
     payload = torch.load(best_path, map_location="cpu", weights_only=False)
-    model.load_state_dict(payload["state"], strict=False)
+    model.load_state_dict(adapt_state(payload["state"], model), strict=False)
     model.eval()
     return model
 
@@ -180,6 +180,33 @@ def _load_phys_res(seed: int, device: torch.device) -> torch.nn.Module:
     return model
 
 
+def adapt_state(state: dict, model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """Map older checkpoint names onto the current module tree.
+
+    Early ``phys_quotient_sym`` saved the orbit MLP as ``neural.mlp`` / ``neural.out``
+    and scalers as ``canonical_*``. ``strict=False`` then left a zero leftover,
+    which is just physics.
+    """
+    names = set(model.state_dict())
+    adapted: dict[str, torch.Tensor] = {}
+    for key, value in state.items():
+        dest = key
+        if dest == "canonical_mean":
+            dest = "feat_mean"
+        elif dest == "canonical_scale":
+            dest = "feat_scale"
+        elif dest.startswith("neural.mlp") or dest.startswith("neural.out"):
+            nested = "neural.residual." + dest[len("neural.") :]
+            if nested in names:
+                dest = nested
+        if dest in names:
+            adapted[dest] = value
+    leftover = [name for name in names if name.endswith("out.weight")]
+    if leftover and not any(name in adapted for name in leftover):
+        raise RuntimeError(f"checkpoint leftover keys did not match {leftover}")
+    return adapted
+
+
 def load_trained(family: str, seed: int, device: torch.device | None = None, symmetric: bool = True) -> torch.nn.Module:
     device = train_device() if device is None else device
     if family == PHYS_RES:
@@ -191,7 +218,7 @@ def load_trained(family: str, seed: int, device: torch.device | None = None, sym
     train, val, _test = load_idsia_prepared()
     stats = _prepare(family, train, val)
     model = _configure(make_model(family, symmetric=symmetric), stats, device)
-    model.load_state_dict(payload["state"], strict=False)
+    model.load_state_dict(adapt_state(payload["state"], model), strict=False)
     model.to(device)
     model.eval()
     return model

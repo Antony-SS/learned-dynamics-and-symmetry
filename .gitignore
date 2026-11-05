@@ -13,7 +13,8 @@ build/
 quadrotor/runs/
 quadrotor/idsia/out/
 unicycle/experiments/out/
-unicycle/experiments/visualizations/
+unicycle/experiments/visualizations/stills/
+unicycle/experiments/visualizations/gifs/
 *.png
 *.pt
 *.html

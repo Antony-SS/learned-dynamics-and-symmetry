@@ -44,7 +44,7 @@ def test_main(family: str) -> None:
     if args.seed is not None and not args.all:
         seeds = [args.seed]
     if not seeds:
-        raise SystemExit(f"no checkpoints under out/runs/{family}/")
+        raise SystemExit(f"no checkpoints under runs/unicycle/{family}/")
     print(f"{'seed':6s}  pos/heading RMSE at 1s  5s  30s  full", flush=True)
     for seed in seeds:
         model = load_trained(family, seed, device=device)
@@ -52,4 +52,4 @@ def test_main(family: str) -> None:
         print(f"{seed:<6d}  {_fmt(row)}", flush=True)
     if len(seeds) > 1:
         family_summary(family)
-        print(f"wrote out/eval/{family}/summary.json", flush=True)
+        print(f"wrote runs/unicycle/eval/{family}/summary.json", flush=True)

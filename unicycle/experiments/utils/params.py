@@ -11,13 +11,12 @@ HORIZON_S = 5.0
 TEST_HORIZONS_S = (1.0, 5.0, 30.0)
 HEADING_LENGTH = MAX_LINEAR_VELOCITY
 EPOCHS = 40
-BATCH = 64
+BATCH = 256
 LR = 1e-4
 SEEDS = (0, 1, 2, 3, 4)
 
-OUT = Path(__file__).resolve().parents[1] / "out"
-RUNS = OUT / "runs"
-EVAL = OUT / "eval"
+RUNS = Path(__file__).resolve().parents[3] / "runs" / "unicycle"
+EVAL = RUNS / "eval"
 VIZ = Path(__file__).resolve().parents[1] / "visualizations"
 
 FAMILIES = (PHYSICS, NAIVE, QUOTIENT, QUOTIENT_AUG, QUOTIENT_SYM)

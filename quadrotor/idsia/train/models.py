@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from quadrotor.idsia.baselines.published import BaseQuadModel, PhysQuadModel
-from quadrotor.symmetry import Orbit, Quotient, apply_body_dx, quotient
+from quadrotor.symmetry import Orbit, Quotient, apply_body_dx, quotient, symmetrize_feature_stats
 
 HIDDEN = 64
 N_HIDDEN = 5
@@ -52,6 +52,10 @@ class BodyLeftover(BaseQuadModel):
         self.register_buffer("feat_scale", torch.ones(dim))
 
     def set_feature_stats(self, mean: torch.Tensor, scale: torch.Tensor) -> None:
+        if isinstance(self.neural, Orbit):
+            # The orbit mirrors standardized features, so the standardization
+            # must be mirror-invariant for exact equivariance.
+            mean, scale = symmetrize_feature_stats(mean, scale)
         with torch.no_grad():
             self.feat_mean.copy_(mean.reshape_as(self.feat_mean).to(self.feat_mean))
             self.feat_scale.copy_(scale.reshape_as(self.feat_scale).to(self.feat_scale).clamp_min(1e-6))

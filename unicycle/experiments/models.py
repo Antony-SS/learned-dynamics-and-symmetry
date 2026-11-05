@@ -1,4 +1,4 @@
-"""Commanded body-step families. Output is (Δx, Δy, Δθ, Δv, Δω)."""
+"""Commanded body-step families. Output is (Δx, 0, Δθ, Δv, Δω)."""
 
 from __future__ import annotations
 
@@ -6,12 +6,14 @@ import torch
 import torch.nn as nn
 
 from unicycle.symmetry import (
-    Orbit,
+    SymmetricQuotientMLP,
     Quotient,
     WorldFeatures,
     apply_body_dx,
     apply_pose_dx,
+    pack_no_slip,
     physics_body_dx,
+    symmetrize_feature_stats,
 )
 
 HIDDEN = 32
@@ -27,7 +29,7 @@ FAMILIES = (PHYSICS,) + TRAIN_FAMILIES
 
 
 class BodyMlp(nn.Module):
-    """Geometry-free MLP. Writes body ``(Δx, Δy, Δθ, Δv, Δω)``."""
+    """Geometry-free MLP. Writes ``(Δx, Δθ, Δv, Δω)``; Δy is filled with 0."""
 
     def __init__(self, in_dim: int, hidden: int = HIDDEN, n_hidden: int = N_HIDDEN) -> None:
         super().__init__()
@@ -37,7 +39,7 @@ class BodyMlp(nn.Module):
             layers += [nn.Linear(dim, hidden), nn.ReLU()]
             dim = int(hidden)
         self.mlp = nn.Sequential(*layers)
-        self.out = nn.Linear(dim, 5)
+        self.out = nn.Linear(dim, 4)
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
@@ -55,13 +57,16 @@ class BodyStep(nn.Module):
         self.register_buffer("feat_scale", torch.ones(dim))
 
     def set_feature_stats(self, mean: torch.Tensor, scale: torch.Tensor) -> None:
+        if isinstance(self.neural, SymmetricQuotientMLP):
+            # The group average mirrors normalized features; keep the mirror at raw ω = 0.
+            mean, scale = symmetrize_feature_stats(mean, scale)
         with torch.no_grad():
             self.feat_mean.copy_(mean.reshape_as(self.feat_mean).to(self.feat_mean))
             self.feat_scale.copy_(scale.reshape_as(self.feat_scale).to(self.feat_scale).clamp_min(1e-6))
 
     def body_dx(self, pose: torch.Tensor, rates: torch.Tensor, command: torch.Tensor) -> torch.Tensor:
         feat = (self.feature_map(pose, rates, command) - self.feat_mean) / self.feat_scale
-        return self.neural(feat)
+        return pack_no_slip(self.neural(feat))
 
     def step(
         self,
@@ -116,5 +121,5 @@ def make_model(family: str) -> nn.Module:
     if family in (QUOTIENT, QUOTIENT_AUG):
         return BodyStep(BodyMlp(Quotient.dim), Quotient())
     if family == QUOTIENT_SYM:
-        return BodyStep(Orbit(BodyMlp(Quotient.dim)), Quotient())
+        return BodyStep(SymmetricQuotientMLP(BodyMlp(Quotient.dim)), Quotient())
     raise ValueError(f"unknown family {family}")

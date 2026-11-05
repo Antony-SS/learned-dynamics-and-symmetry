@@ -1,1 +1,1 @@
-"""Robotarium unicycle experiments: commanded (v, ω) leftovers."""
+"""Robotarium unicycle experiments: commanded (v, ω) dynamics."""

@@ -20,7 +20,7 @@ def _fmt(row: dict[str, list[float]]) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="auto", help="auto (MPS if available), cpu, mps, cuda")
     args = parser.parse_args()
     device = train_device(args.device)
     _train, _val, test = load_idsia_prepared()

@@ -10,11 +10,11 @@ Every leftover we train writes the same **body** 12-D increment `(Δp, Δv, Δθ
 
 ## Ours vs. Theirs
 
-Melon MAE at h = 1 / 10 / 50 on position, rotation, velocity, ω. Analytic physics is the only published/loaded baseline. Their phys+res architecture we retrain ourselves (`runs/quadrotor/phys_res/`, 5 seeds) — the official checkpoint was undertrained. We then keep their analytic RK4 and change only the leftover (quotient, then quotient + Z₂×Z₂). `SymmetryQuadDynamicsNet` is a separate test: drop their vehicle model and rely on symmetry alone.
+Melon MAE at h = 1 / 10 / 50 on position, rotation, velocity and ω. Analytic physics is the only baseline we load as published. We retrain their phys+res architecture ourselves (`runs/quadrotor/phys_res/`, 5 seeds), because the official checkpoint was undertrained. We then keep their analytic RK4 and change only the leftover (quotient, then quotient + Z₂×Z₂). `SymmetryQuadDynamicsNet` is a separate test: it drops their vehicle model and relies on symmetry alone.
 
 ### Their baselines
 
-They trained several nets; only physics and physics+residual beat “just physics” on Melon, so those two are the comparison.
+They trained several networks. Only physics and physics+residual beat their own physics-only baseline on Melon, so those two are our comparison.
 
 #### Pure physics
 
@@ -28,19 +28,21 @@ Analytic Crazyflie rigid body, RK4, `dt = 0.01`. Motors (rad/s) map to thrust an
 
 #### Physics + residual (their leftover)
 
-Frozen copy of the physics above, plus an MLP on the **normalized world** chart.  We reproduced their published numbers, and did slightly better (theirs was actually slightly undertrained).  
+A frozen copy of the physics above, plus an MLP on the **normalized world** chart. We reproduced their published numbers and did slightly better, because their checkpoint was slightly undertrained.
 
-- **Input:** normalized `(p, v, Log R, ω)` and normalized `Ω` (16-D concat) where normalization is done per channel on the training data.  This is standard.
+- **Input:** normalized `(p, v, Log R, ω)` and normalized `Ω` (16-D concat). Each channel is standardized with training-set statistics.
 - **Output:** `x_phys + Δx` in the same normalized world chart, then denormalized.
-- **Measures:** their leftover, trained with their recipe (5 seeds). Table uses `runs/quadrotor/phys_res/` which are our trained reproductions, which fair slightly better than their published`phys+res_random_square_chirp.pt`.
+- **Measures:** their leftover, trained with their recipe (5 seeds). The table uses our reproductions in `runs/quadrotor/phys_res/`, which do slightly better than their published `phys+res_random_square_chirp.pt`.
 
 ### Our trained models
 
-Same body leftover MLP (13 → 12, hidden 64 × 5). First two keep their RK4 and only change the leftover. The last drops the vehicle model.
+All three use the same body-leftover MLP (13 → 12, hidden 64 × 5). The first two keep their RK4 and change only the leftover. The last drops the vehicle model.
+
+The two symmetric families standardize their features with mirror-invariant statistics (`symmetrize_feature_stats`), so the `Orbit` average is exactly equivariant. Checkpoints trained before this fix keep their saved statistics and are only approximately equivariant until retrained.
 
 #### `PhysQuotient` (`phys_quotient`)
 
-Their analytic RK4, leftover on the quotient, **no** morphological average. First step off their phys+res: same physics, leftover no longer sees world `p` / yaw and no longer adds in the world chart.
+Their analytic RK4, with the leftover on the quotient and **no** morphological average. This is the first step away from their phys+res: the physics is the same, but the leftover no longer sees world `p` or yaw and no longer adds in the world chart.
 
 - **Input:** 13-D quotient `(g_body, v_body, ω, Ω)`, one pass (no orbit).
 - **Output:** body residual **added after** frozen RK4.
@@ -60,7 +62,7 @@ Same as `PhysQuotient`, plus Z₂×Z₂ Reynolds averaging on the residual.
 
 #### `SymmetryQuadDynamicsNet` (`sym_quad_dynamics`)
 
-No Crazyflie force/torque model. The net predicts the whole step; we only enforce rigid-body composition and airframe symmetry. Interesting as a test of **symmetry as the only prior**.
+No Crazyflie force or torque model. The network predicts the whole step, and we only enforce rigid-body composition and airframe symmetry. It tests **symmetry as the only prior**.
 
 - **Input:** 13-D quotient. `Orbit` evaluates all four mirrors and Reynolds-averages the body output.
 - **Output:** body `(Δp, Δv, Δθ, Δω)`, integrated from the **current** state (`apply_body_dx` with no RK4).

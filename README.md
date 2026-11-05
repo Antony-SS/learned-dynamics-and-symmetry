@@ -29,7 +29,7 @@ Unicycle Robotarium logs are not in this repo. Download the [Robotarium dataset]
 ## Layout
 
 - `src/learned_dynamics`: MLP and the full-batch trainer.
-- `unicycle`: SE(2) geometry and leftover wrappers. Robotarium experiments live in `unicycle/experiments/`.
+- `unicycle`: SE(2) geometry and dynamics wrappers. Robotarium experiments live in `unicycle/experiments/`.
 - `quadrotor/flight.py` and `quadrotor/geometry.py`: `PreparedFlight` and SO(3) / kinematics.
 - `quadrotor/idsia`: Busetto et al. Crazyflie sys-id.
 

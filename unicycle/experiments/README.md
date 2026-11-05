@@ -1,6 +1,6 @@
 # Robotarium unicycle experiments
 
-Commanded `(v, ω)` leftovers on robot 11 `standard_collections`. Shared SE(2) maps live in `unicycle/`.
+Commanded `(v, ω)` dynamics on robot 11 `standard_collections`. Shared SE(2) maps live in `unicycle/`.
 
 Layout: `data.py` (split + mirrors), `models.py` (families), `train/` (5 s windows), `eval/` (test xyyaw), `utils/` (horizons + CLI), `visualizations/` (stills / gifs from the train notebook).
 
@@ -24,45 +24,45 @@ Ideal unicycle on commanded `(v, ω)`: `Δx = v dt`, `Δy = 0`, `Δθ = ω dt`, 
 
 ## Trained families
 
-Same leftover MLP (hidden 32 × 3). Output is body `(Δx, Δy, Δθ, Δv, Δω)`. Polar pose parts rotate with heading; the next rates are `rates + (Δv, Δω)`.
+Same MLP (hidden 32 × 3). Output is `(Δx, Δθ, Δv, Δω)` with **Δy = 0**. Polar Δx rotates with heading; the next rates are `rates + (Δv, Δω)`.
 
-### `NaiveUnicycle` (`naive`)
+### Naive (`naive`)
 
 Sees the arena pose.
 
 - **Input:** 7-D `(x, y, θ, v, ω, v_cmd, ω_cmd)`.
-- **Output:** 5-D body increment, rigid-body integrated from the current state.
+- **Output:** `(Δx, 0, Δθ, Δv, Δω)`, rigid-body integrated from the current state.
 - **Measures:** a geometry-free baseline.
 
-### `QuotientUnicycleNet` (`quotient`)
+### Quotient (`quotient`)
 
 Drops translation and heading.
 
 - **Input:** 4-D `(v, ω, v_cmd, ω_cmd)`.
-- **Output:** 5-D body increment.
+- **Output:** `(Δx, 0, Δθ, Δv, Δω)`.
 - **Measures:** SE(2) quotient only.
 
-### `QuotientUnicycleNet` + data augmentation (`quotient_aug`)
+### Quotient + data augmentation (`quotient_aug`)
 
 Same net as `quotient`. Training prefixes are concatenated with their left–right mirrors (`y, θ, ω, ω_cmd` flip). Val and test are not mirrored.
 
-- **Measures:** does flipping the train set close the gap to an equivariant leftover?
+- **Measures:** does flipping the train set close the gap to an equivariant map?
 
-### `QuotientSymUnicycleNet` (`quotient_sym`)
+### Symmetric quotient (`quotient_sym`)
 
-Quotient leftover, Reynolds-averaged over the two Z₂ elements (identity and left–right). Wheels swap; polar / axial signs on the leftover; v stays.
+The same quotient MLP, averaged over the two Z₂ elements (identity and the left–right mirror). The mirror swaps the wheels: v stays and ω flips, and the increment gets the matching polar and axial signs. Features are standardized with mirror-invariant statistics (zero mean on ω and ω_cmd), so the average is exactly equivariant.
 
-- **Input:** 4-D quotient; `Orbit` runs both group elements.
-- **Output:** averaged 5-D body increment.
+- **Input:** 4-D quotient. `SymmetricQuotientMLP` runs both group elements in one batch.
+- **Output:** averaged `(Δx, 0, Δθ, Δv, Δω)`.
 - **Measures:** hard morphological symmetry vs data-aug.
 
 | family | class | prior | input | output |
 | --- | --- | --- | --- | --- |
 | (loaded) | `PhysicsUnicycle` | analytic unicycle | pose + command | next pose |
-| `naive` | `NaiveUnicycle` | none | world 7-D | body 5-D |
-| `quotient` | `QuotientUnicycleNet` | SE(2) quotient | 4-D rates+cmd | body 5-D |
-| `quotient_aug` | same as quotient | quotient + mirrored train | 4-D | body 5-D |
-| `quotient_sym` | `QuotientSymUnicycleNet` | quotient + Z₂ | 4-D, orbit | body 5-D |
+| `naive` | `BodyStep(BodyMlp(7), WorldFeatures())` | none | world 7-D | Δx, Δθ, Δv, Δω |
+| `quotient` | `BodyStep(BodyMlp(4), Quotient())` | SE(2) quotient | 4-D rates + cmd | Δx, Δθ, Δv, Δω |
+| `quotient_aug` | same as `quotient` | quotient + mirrored train | 4-D | Δx, Δθ, Δv, Δω |
+| `quotient_sym` | `BodyStep(SymmetricQuotientMLP(BodyMlp(4)), Quotient())` | quotient + Z₂ | 4-D, group average | Δx, Δθ, Δv, Δω |
 
 ```bash
 python -m unicycle.experiments.train.naive --seed 0

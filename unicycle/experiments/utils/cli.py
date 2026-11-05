@@ -21,7 +21,7 @@ def _fmt(row: dict) -> str:
 def train_main(family: str) -> None:
     parser = argparse.ArgumentParser(description=f"Train {family}")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="auto", help="auto (MPS if available), cpu, mps, cuda")
     args = parser.parse_args()
     train_family(family, args.seed, device=train_device(args.device))
 
@@ -30,7 +30,7 @@ def test_main(family: str) -> None:
     parser = argparse.ArgumentParser(description=f"Test-set xyyaw for {family}")
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--all", action="store_true")
-    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--device", default="auto", help="auto (MPS if available), cpu, mps, cuda")
     args = parser.parse_args()
     device = train_device(args.device)
     _train, _val, test = load_split()

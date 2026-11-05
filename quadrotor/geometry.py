@@ -63,11 +63,11 @@ def module_device(model: torch.nn.Module) -> torch.device:
     return torch.device("cpu")
 
 
-def train_device(requested: str | torch.device = "cpu") -> torch.device:
-    requested = torch.device(requested)
-    if requested.type == "cpu" and torch.backends.mps.is_available():
-        return torch.device("mps")
-    return requested
+def train_device(requested: str | torch.device | None = None) -> torch.device:
+    """The requested device. ``None`` or ``"auto"`` picks MPS when available, else CPU."""
+    if requested is None or requested == "auto":
+        return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+    return torch.device(requested)
 
 
 def _hat(vector: torch.Tensor) -> torch.Tensor:

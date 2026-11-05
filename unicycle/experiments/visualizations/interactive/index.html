@@ -11,62 +11,48 @@
       --line: #d5e2f0;
       --paper: #ffffff;
       --wash: #f4f8fc;
-      --vicon: #1d4e89;
-      --vicon-faint: #c5d4e8;
       --pred: #2b6cb0;
-      --phys: #8aa4c4;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; background: var(--wash); color: var(--ink); font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
     .wrap { max-width: 1080px; margin: 0 auto; padding: 28px 24px 40px; }
     h1 { font-size: 22px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.02em; }
     .sub { color: var(--muted); margin-bottom: 22px; }
-    .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
-    .row { display: grid; grid-template-columns: 1.3fr 1fr auto; gap: 14px; align-items: end; }
+    .panel, .stage { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+    .row { display: grid; grid-template-columns: 1.4fr 0.7fr auto; gap: 14px; align-items: end; }
     label { display: block; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
-    select, button { font: inherit; }
-    select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--wash); color: var(--ink); }
-    .checks { display: flex; gap: 14px; align-items: center; padding-bottom: 8px; color: var(--ink); }
-    .checks input { accent-color: var(--pred); }
-    .btns { display: flex; gap: 8px; }
-    button { border: 0; border-radius: 8px; padding: 9px 16px; cursor: pointer; }
-    #play { background: var(--pred); color: white; }
-    #stop { background: var(--wash); color: var(--ink); border: 1px solid var(--line); }
+    select, input[type="number"], button { font: inherit; }
+    select, input[type="number"] { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--wash); color: var(--ink); }
+    button { border: 0; border-radius: 8px; padding: 9px 16px; cursor: pointer; background: var(--pred); color: white; }
     button:disabled { opacity: 0.45; cursor: default; }
-    .scrub { margin-top: 16px; }
+    .scrub { margin-top: 14px; }
     input[type="range"] { width: 100%; accent-color: var(--pred); }
     .meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 4px; }
-    .stage { margin-top: 16px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+    .toggles { display: flex; flex-wrap: wrap; gap: 12px 16px; margin-top: 14px; color: var(--ink); font-size: 13px; }
+    .toggles label { text-transform: none; letter-spacing: 0; margin: 0; display: flex; align-items: center; gap: 6px; }
+    .toggles input { accent-color: var(--pred); }
+    .sw { display: inline-block; width: 14px; height: 3px; border-radius: 1px; }
+    .stage { margin-top: 16px; padding: 12px; }
     canvas { width: 100%; height: min(68vh, 640px); display: block; }
-    .legend { display: flex; gap: 18px; color: var(--muted); font-size: 12px; padding: 4px 8px 0; }
-    .swatch { display: inline-block; width: 18px; height: 3px; margin-right: 6px; vertical-align: middle; }
     .status { min-height: 1.2em; color: var(--muted); font-size: 12px; margin-top: 10px; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Unicycle rollout</h1>
-    <div class="sub">Pick a checkpoint and a collection. Scrub to a start time, play, stop whenever you want.</div>
+    <div class="sub">Set a start and a window. Rollout runs every trained model plus physics. Scrub the window; checkboxes show or hide paths.</div>
     <div class="panel">
       <div class="row">
-        <div>
-          <label for="model">Trained model</label>
-          <select id="model"></select>
-        </div>
         <div>
           <label for="collection">Collection</label>
           <select id="collection"></select>
         </div>
         <div>
-          <div class="checks">
-            <label style="text-transform:none;letter-spacing:0;font-size:14px;margin:0">
-              <input type="checkbox" id="physics" /> Show unicycle physics
-            </label>
-          </div>
-          <div class="btns">
-            <button id="play" type="button">Play</button>
-            <button id="stop" type="button" disabled>Stop</button>
-          </div>
+          <label for="window">Window (s)</label>
+          <input id="window" type="number" min="0.5" max="60" step="0.5" value="5" />
+        </div>
+        <div>
+          <button id="go" type="button">Rollout</button>
         </div>
       </div>
       <div class="scrub">
@@ -74,26 +60,47 @@
         <input id="start" type="range" min="0" max="1" step="0.033" value="0" />
         <div class="meta"><span>0 s</span><span id="endLabel">0 s</span></div>
       </div>
+      <div class="scrub">
+        <label for="playhead">In window <span id="headLabel">0.0 s</span></label>
+        <input id="playhead" type="range" min="0" max="1" step="0.033" value="0" disabled />
+        <div class="meta"><span>0 s</span><span id="winEnd">window</span></div>
+      </div>
+      <div class="toggles" id="toggles"></div>
       <div class="status" id="status"></div>
     </div>
     <div class="stage">
       <canvas id="plot"></canvas>
-      <div class="legend">
-        <span><i class="swatch" style="background:#c5d4e8"></i>Vicon</span>
-        <span><i class="swatch" style="background:#2b6cb0"></i>Predicted</span>
-        <span><i class="swatch" style="background:#8aa4c4"></i>Physics</span>
-      </div>
     </div>
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
+    const COLORS = {
+      vicon: "#111827",
+      physics: "#9ca3af",
+      naive: "#2563eb",
+      quotient: "#dc2626",
+      quotient_aug: "#d97706",
+      quotient_sym: "#059669",
+    };
     const canvas = $("plot");
     const ctx = canvas.getContext("2d");
     let collection = null;
-    let playData = null;
-    let frame = 0;
-    let playing = false;
-    let raf = 0;
+    let roll = null;
+    let models = [];
+
+    function setStatus(t) { $("status").textContent = t || ""; }
+    function startIndex() {
+      if (!collection) return 0;
+      return Math.min(collection.x.length - 2, Math.round(Number($("start").value) / collection.dt));
+    }
+    function headIndex() {
+      if (!roll) return 0;
+      return Math.min(roll.steps, Math.round(Number($("playhead").value) / roll.dt));
+    }
+    function colorFor(id) {
+      if (id === "vicon" || id === "physics") return COLORS[id];
+      return COLORS[id.split("/")[0]] || "#2b6cb0";
+    }
 
     function resize() {
       const dpr = window.devicePixelRatio || 1;
@@ -103,8 +110,6 @@
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       draw();
     }
-
-    function setStatus(text) { $("status").textContent = text || ""; }
 
     function bounds() {
       const xs = collection.x, ys = collection.y;
@@ -122,6 +127,7 @@
     }
 
     function strokePath(xs, ys, i0, i1, b, w, h, color, width) {
+      if (i1 < i0) return;
       ctx.beginPath();
       for (let i = i0; i <= i1; i++) {
         const [px, py] = project(xs[i], ys[i], b, w, h);
@@ -146,9 +152,34 @@
       ctx.stroke();
     }
 
-    function startIndex() {
-      if (!collection) return 0;
-      return Math.min(collection.x.length - 2, Math.round(Number($("start").value) / collection.dt));
+    function buildToggles() {
+      const box = $("toggles");
+      box.innerHTML = "";
+      const items = [
+        { id: "vicon", label: "Ground truth" },
+        { id: "physics", label: "Physics" },
+        ...models.map((m) => ({ id: m.id, label: m.label })),
+      ];
+      for (const item of items) {
+        const lab = document.createElement("label");
+        const inp = document.createElement("input");
+        inp.type = "checkbox";
+        inp.checked = true;
+        inp.dataset.trace = item.id;
+        inp.addEventListener("change", draw);
+        const sw = document.createElement("i");
+        sw.className = "sw";
+        sw.style.background = colorFor(item.id);
+        lab.appendChild(inp);
+        lab.appendChild(sw);
+        lab.appendChild(document.createTextNode(item.label));
+        box.appendChild(lab);
+      }
+    }
+
+    function visible(id) {
+      const inp = document.querySelector('input[data-trace="' + CSS.escape(id) + '"]');
+      return !inp || inp.checked;
     }
 
     function draw() {
@@ -158,44 +189,26 @@
       if (!collection) return;
       const b = bounds();
       const s = startIndex();
-      strokePath(collection.x, collection.y, 0, collection.x.length - 1, b, w, h, "#c5d4e8", 2);
-      heading(collection.x[s], collection.y[s], collection.yaw[s], b, w, h, "#1d4e89");
-      if (!playData) return;
-      const k = frame;
-      strokePath(playData.vicon.x, playData.vicon.y, 0, k, b, w, h, "#1d4e89", 2.2);
-      heading(playData.vicon.x[k], playData.vicon.y[k], playData.vicon.yaw[k], b, w, h, "#1d4e89");
-      if (playData.pred) {
-        strokePath(playData.pred.x, playData.pred.y, 0, k, b, w, h, "#2b6cb0", 2.2);
-        heading(playData.pred.x[k], playData.pred.y[k], playData.pred.yaw[k], b, w, h, "#2b6cb0");
+      strokePath(collection.x, collection.y, 0, collection.x.length - 1, b, w, h, "#d5e2f0", 2);
+      heading(collection.x[s], collection.y[s], collection.yaw[s], b, w, h, "#6b7280");
+      if (!roll) return;
+      const k = headIndex();
+      const order = ["vicon", "physics", ...models.map((m) => m.id)];
+      for (const id of order) {
+        if (!visible(id) || !roll.traces[id]) continue;
+        const tr = roll.traces[id];
+        const last = Math.min(k, tr.x.length - 1);
+        const col = colorFor(id);
+        strokePath(tr.x, tr.y, 0, last, b, w, h, col, id === "vicon" ? 2.4 : 2.0);
+        heading(tr.x[last], tr.y[last], tr.yaw[last], b, w, h, col);
       }
-      if (playData.physics) {
-        strokePath(playData.physics.x, playData.physics.y, 0, k, b, w, h, "#8aa4c4", 2);
-        heading(playData.physics.x[k], playData.physics.y[k], playData.physics.yaw[k], b, w, h, "#8aa4c4");
-      }
-    }
-
-    function stopPlay() {
-      playing = false;
-      cancelAnimationFrame(raf);
-      $("stop").disabled = true;
-      $("play").disabled = false;
-    }
-
-    function tick() {
-      if (!playing || !playData) return;
-      const n = playData.vicon.x.length - 1;
-      frame = Math.min(n, frame + 2);
-      draw();
-      if (frame >= n) { stopPlay(); setStatus("end of collection"); return; }
-      raf = requestAnimationFrame(tick);
     }
 
     async function loadCollection() {
-      stopPlay();
-      playData = null;
+      roll = null;
+      $("playhead").disabled = true;
       const name = $("collection").value;
-      const res = await fetch("/api/collection?name=" + encodeURIComponent(name));
-      collection = await res.json();
+      collection = await (await fetch("/api/collection?name=" + encodeURIComponent(name))).json();
       $("start").max = collection.duration.toFixed(3);
       $("start").step = collection.dt;
       $("start").value = "0";
@@ -204,56 +217,61 @@
       draw();
     }
 
-    async function play() {
-      if (!$("model").value && !$("physics").checked) { setStatus("pick a trained .pt, or turn on physics"); return; }
-      stopPlay();
-      setStatus("rolling out…");
-      $("play").disabled = true;
-      const res = await fetch("/api/rollout", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: $("model").value,
-          collection: $("collection").value,
-          start_s: Number($("start").value),
-          physics: $("physics").checked,
-        }),
-      });
-      playData = await res.json();
-      if (playData.error) { setStatus(playData.error); $("play").disabled = false; return; }
-      frame = 0;
-      playing = true;
-      $("stop").disabled = false;
-      setStatus("playing  ·  stop anytime, then scrub and play again");
-      tick();
+    async function rollout() {
+      setStatus("rolling out every model…");
+      $("go").disabled = true;
+      try {
+        const res = await fetch("/api/rollout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            collection: $("collection").value,
+            start_s: Number($("start").value),
+            window_s: Number($("window").value),
+          }),
+        });
+        const data = await res.json();
+        if (data.error) { setStatus(data.error); return; }
+        roll = data;
+        models = data.models || [];
+        $("playhead").disabled = false;
+        $("playhead").max = data.window_s.toFixed(3);
+        $("playhead").step = data.dt;
+        $("playhead").value = data.window_s.toFixed(3);
+        $("winEnd").textContent = data.window_s.toFixed(1) + " s";
+        $("headLabel").textContent = data.window_s.toFixed(2) + " s";
+        buildToggles();
+        draw();
+        setStatus("window " + data.window_s.toFixed(2) + " s  ·  " + models.length + " models");
+      } catch (err) {
+        setStatus(String(err));
+      } finally {
+        $("go").disabled = false;
+      }
     }
 
     $("start").addEventListener("input", () => {
-      stopPlay();
-      playData = null;
-      $("startLabel").textContent = Number($("start").value).toFixed(1) + " s";
+      $("startLabel").textContent = Number($("start").value).toFixed(2) + " s";
       draw();
     });
-    $("play").addEventListener("click", play);
-    $("stop").addEventListener("click", () => { stopPlay(); setStatus("stopped"); });
+    $("playhead").addEventListener("input", () => {
+      $("headLabel").textContent = Number($("playhead").value).toFixed(2) + " s";
+      draw();
+    });
+    $("go").addEventListener("click", rollout);
     $("collection").addEventListener("change", loadCollection);
     window.addEventListener("resize", resize);
 
     (async function init() {
-      const models = await (await fetch("/api/models")).json();
-      for (const m of models.models) {
-        const opt = document.createElement("option");
-        opt.value = m.id; opt.textContent = m.label;
-        $("model").appendChild(opt);
-      }
-      const cols = await (await fetch("/api/collections")).json();
-      for (const c of cols.collections) {
+      models = (await (await fetch("/api/models")).json()).models;
+      const cols = (await (await fetch("/api/collections")).json()).collections;
+      for (const c of cols) {
         const opt = document.createElement("option");
         opt.value = c.name; opt.textContent = c.name;
         $("collection").appendChild(opt);
       }
-      if (!models.models.length) setStatus("no checkpoints in runs/unicycle yet");
-      if (cols.collections.length) await loadCollection();
+      if (!models.length) setStatus("no best.pt under runs/unicycle");
+      if (cols.length) await loadCollection();
       resize();
     })();
   </script>

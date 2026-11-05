@@ -1,1 +1,1 @@
-"""SE(2) geometry and leftover wrappers. Robotarium runs live in ``experiments/``."""
+"""SE(2) geometry and dynamics wrappers. Robotarium runs live in ``experiments/``."""

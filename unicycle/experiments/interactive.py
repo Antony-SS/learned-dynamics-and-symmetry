@@ -25,7 +25,7 @@ def list_checkpoints() -> list[dict]:
     if not RUNS.is_dir():
         return []
     rows = []
-    for path in sorted(RUNS.glob("*/*/*.pt")):
+    for path in sorted(RUNS.glob("*/*/best.pt")):
         if "eval" in path.parts:
             continue
         family = path.parent.parent.name
@@ -63,11 +63,16 @@ def _index_at(log, start_s: float) -> int:
     return min(max(idx, 0), log.n_steps - 1)
 
 
+def _xyyaw(poses: np.ndarray) -> dict:
+    return {"x": poses[:, 0].tolist(), "y": poses[:, 1].tolist(), "yaw": poses[:, 2].tolist()}
+
+
 @torch.no_grad()
-def _roll(model, log, start: int) -> np.ndarray:
+def _roll(model, log, start: int, steps: int) -> np.ndarray:
+    stop = min(start + int(steps), log.n_steps)
     pose = torch.tensor(log.poses[start], dtype=torch.float32).unsqueeze(0)
     rates = torch.tensor(log.rates[start], dtype=torch.float32).unsqueeze(0)
-    commands = torch.tensor(log.commands[start:], dtype=torch.float32).unsqueeze(0)
+    commands = torch.tensor(log.commands[start:stop], dtype=torch.float32).unsqueeze(0)
     pred = model.rollout(pose, rates, commands, log.dt).squeeze(0).numpy()
     return np.vstack((log.poses[start], pred))
 
@@ -140,27 +145,27 @@ class Handler(BaseHTTPRequestHandler):
             return
         log = logs[name]
         start = _index_at(log, float(body.get("start_s", 0.0)))
-        model_id = body.get("model", "")
-        ckpt = RUNS / model_id
-        family = ckpt.parent.parent.name if model_id else ""
-        pred = None
-        if model_id and ckpt.is_file() and family in TRAIN_FAMILIES:
-            pred = _roll(_load_model(str(ckpt), family), log, start)
-        phys = _roll(make_model(PHYSICS), log, start) if body.get("physics") else None
-        payload = {
-            "start": start,
-            "dt": log.dt,
-            "vicon": {
-                "x": log.poses[start:, 0].tolist(),
-                "y": log.poses[start:, 1].tolist(),
-                "yaw": log.poses[start:, 2].tolist(),
-            },
+        window_s = max(float(body.get("window_s", 5.0)), log.dt)
+        steps = min(max(int(round(window_s / log.dt)), 1), log.n_steps - start)
+        traces = {
+            "vicon": _xyyaw(log.poses[start : start + steps + 1]),
+            "physics": _xyyaw(_roll(make_model(PHYSICS), log, start, steps)),
         }
-        if pred is not None:
-            payload["pred"] = {"x": pred[:, 0].tolist(), "y": pred[:, 1].tolist(), "yaw": pred[:, 2].tolist()}
-        if phys is not None:
-            payload["physics"] = {"x": phys[:, 0].tolist(), "y": phys[:, 1].tolist(), "yaw": phys[:, 2].tolist()}
-        self._json(payload)
+        models = []
+        for ckpt in list_checkpoints():
+            pred = _roll(_load_model(ckpt["path"], ckpt["family"]), log, start, steps)
+            traces[ckpt["id"]] = _xyyaw(pred)
+            models.append({"id": ckpt["id"], "label": ckpt["label"], "family": ckpt["family"]})
+        self._json(
+            {
+                "start": start,
+                "dt": log.dt,
+                "steps": steps,
+                "window_s": steps * log.dt,
+                "models": models,
+                "traces": traces,
+            }
+        )
 
 
 def main() -> None:

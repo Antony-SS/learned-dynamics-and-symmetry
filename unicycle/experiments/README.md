@@ -24,7 +24,7 @@ Ideal unicycle on commanded `(v, ω)`: `Δx = v dt`, `Δy = 0`, `Δθ = ω dt`, 
 
 ## Trained families
 
-Same MLP (hidden 32 × 3). Output is `(Δx, Δθ, Δv, Δω)` with **Δy = 0**. Polar Δx rotates with heading; the next rates are `rates + (Δv, Δω)`.
+Same MLP (hidden 32 × 3). Output is packed `(Δx, Δy, Δθ, Δv, Δω)`. Body Δx and Δy rotate with heading; the next rates are `rates + (Δv, Δω)`.
 
 ### Naive (`naive`)
 
@@ -59,10 +59,10 @@ The same quotient MLP, averaged over the two Z₂ elements (identity and the lef
 | family | class | prior | input | output |
 | --- | --- | --- | --- | --- |
 | (loaded) | `PhysicsUnicycle` | analytic unicycle | pose + command | next pose |
-| `naive` | `BodyStep(BodyMlp(7), WorldFeatures())` | none | world 7-D | Δx, Δθ, Δv, Δω |
-| `quotient` | `BodyStep(BodyMlp(4), Quotient())` | SE(2) quotient | 4-D rates + cmd | Δx, Δθ, Δv, Δω |
-| `quotient_aug` | same as `quotient` | quotient + mirrored train | 4-D | Δx, Δθ, Δv, Δω |
-| `quotient_sym` | `BodyStep(SymmetricQuotientMLP(BodyMlp(4)), Quotient())` | quotient + Z₂ | 4-D, group average | Δx, Δθ, Δv, Δω |
+| `naive` | `BodyStep(BodyMlp(7), WorldFeatures())` | none | world 7-D | Δx, Δy, Δθ, Δv, Δω |
+| `quotient` | `BodyStep(BodyMlp(4), Quotient())` | SE(2) quotient | 4-D rates + cmd | Δx, Δy, Δθ, Δv, Δω |
+| `quotient_aug` | same as `quotient` | quotient + mirrored train | 4-D | Δx, Δy, Δθ, Δv, Δω |
+| `quotient_sym` | `BodyStep(SymmetricQuotientMLP(BodyMlp(4)), Quotient())` | quotient + Z₂ | 4-D, group average | Δx, Δy, Δθ, Δv, Δω |
 
 ```bash
 python -m unicycle.experiments.train.naive --seed 0

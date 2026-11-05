@@ -38,7 +38,7 @@ import torch.nn as nn
 BASE_LENGTH = 0.105
 N_GROUP = 2
 QUOTIENT_DIM = 4
-INCREMENT_DIM = 4
+INCREMENT_DIM = 5
 
 # The two elements of Z₂: identity, then the left–right mirror (reflection
 # through the body xz plane, which swaps the wheels).
@@ -52,10 +52,10 @@ GROUP_FEAT_SIGN = (
     (1.0, 1.0, 1.0, 1.0),
     (1.0, -1.0, 1.0, -1.0),
 )
-# Increment: (Δx, Δθ, Δv, Δω).
+# Packed increment: (Δx, Δy, Δθ, Δv, Δω). Δy is polar (flips under mirror).
 GROUP_DX_SIGN = (
-    (1.0, 1.0, 1.0, 1.0),
-    (1.0, -1.0, 1.0, -1.0),
+    (1.0, 1.0, 1.0, 1.0, 1.0),
+    (1.0, -1.0, -1.0, 1.0, -1.0),
 )
 
 
@@ -171,7 +171,7 @@ def mirror_quotient(features: torch.Tensor) -> torch.Tensor:
 
 
 def mirror_body_dx(dx_body: torch.Tensor) -> torch.Tensor:
-    """Left–right mirror of an increment ``(Δx, Δθ, Δv, Δω)``."""
+    """Left–right mirror of a packed increment ``(Δx, Δy, Δθ, Δv, Δω)``."""
     return dx_body * dx_body.new_tensor(GROUP_DX_SIGN[1])
 
 
@@ -216,8 +216,7 @@ class SymmetricQuotientMLP(nn.Module):
         docstring).
 
     Output:
-        ``(B, 4)`` body increment ``(Δx, Δθ, Δv, Δω)``. Use :func:`pack_no_slip`
-        to add Δy = 0.
+        ``(B, 5)`` packed increment ``(Δx, Δy, Δθ, Δv, Δω)``.
     """
 
     def __init__(self, net: nn.Module) -> None:

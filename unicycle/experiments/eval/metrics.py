@@ -16,6 +16,21 @@ from unicycle.experiments.utils.params import EVAL, TEST_HORIZONS_S, eval_dir
 from unicycle.symmetry import wrap_angle
 
 
+def metric_keys() -> tuple[str, ...]:
+    """Keys on rows returned by :func:`eval_model` (matches ``TEST_HORIZONS_S``)."""
+    return tuple(f"{h:g}s" for h in TEST_HORIZONS_S) + ("full",)
+
+
+def format_eval_row(row: dict) -> str:
+    parts = []
+    for key in metric_keys():
+        parts.append(
+            f"{key} {row[key]['position_rmse']:.4f} m / {row[key]['heading_rmse']:.3f} rad"
+        )
+    seed = row.get("seed", "")
+    return f"{row['family']} {seed}  " + " |".join(parts)
+
+
 def _horizon_errors(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
     dxy = pred[..., :2] - target[..., :2]
     pos = float(torch.sqrt((dxy ** 2).sum(dim=-1).mean()))
@@ -101,7 +116,7 @@ def family_summary(family: str) -> dict:
         rows.append(json.loads(path.read_text()))
     if not rows:
         raise FileNotFoundError(f"no eval under {folder}")
-    keys = [f"{h:g}s" for h in TEST_HORIZONS_S] + ["full"]
+    keys = list(metric_keys())
     summary = {"family": family, "n": len(rows)}
     for key in keys:
         for metric in ("position_rmse", "heading_rmse", "xyyaw"):

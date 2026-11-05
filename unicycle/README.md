@@ -4,7 +4,7 @@ Shared SE(2) geometry and symmetry wrappers. Robotarium experiments live in [`ex
 
 ## Overview
 
-`symmetry.py` wraps an arbitrary MLP. The network writes a body-frame increment (Δx, Δθ, Δv, Δω). Sideslip **Δy is fixed at 0**. We integrate on SE(2): Δx is lifted through the current heading, and the rate increments are added in the body frame. Commands are the Robotarium *commanded* (v, ω), not encoder-measured rates.
+`symmetry.py` wraps an arbitrary MLP. The network writes a packed body increment (Δx, Δy, Δθ, Δv, Δω). The analytic physics baseline keeps **Δy = 0**; learned models predict Δy. We integrate on SE(2): Δx is lifted through the current heading, and the rate increments are added in the body frame. Commands are the Robotarium *commanded* (v, ω), not encoder-measured rates.
 
 The pieces:
 
@@ -33,7 +33,7 @@ dx = model((quotient_features(rates, command) - mean) / scale)
 pose, rates = apply_body_dx(pose, rates, pack_no_slip(dx))
 ```
 
-The analytic unicycle plant (the physics baseline) uses Δx = v_cmd dt, Δy = 0, Δθ = ω_cmd dt, and sets the next rates to the command. The learned families predict (Δx, Δθ, Δv, Δω).
+The analytic unicycle plant (the physics baseline) uses Δx = v_cmd dt, Δy = 0, Δθ = ω_cmd dt, and sets the next rates to the command. The learned families predict (Δx, Δy, Δθ, Δv, Δω).
 
 ## Math
 

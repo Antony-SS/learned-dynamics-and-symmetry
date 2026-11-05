@@ -179,7 +179,7 @@ class PhysQuadModel(BaseQuadModel):
             thrust_body = torch.zeros_like(vel)
             thrust_body[:, 2] = thrust
             acc = (quat_rotate(quat, thrust_body) - self.m * self.gravity) / self.m
-            j_omega = omega @ self.J.T
+            j_omega = omega @ self.J.T.to(dtype=omega.dtype)
             omega_dot = torch.linalg.solve(
                 self.J, (tau - torch.cross(omega, j_omega, dim=-1)).unsqueeze(-1)
             ).squeeze(-1)

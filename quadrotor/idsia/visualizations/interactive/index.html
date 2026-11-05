@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IDSIA Melon rollout</title>
+  <style>
+    :root {
+      --ink: #1a365d;
+      --muted: #5b7aa0;
+      --line: #d5e2f0;
+      --paper: #ffffff;
+      --wash: #f4f8fc;
+      --pred: #2b6cb0;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--wash); color: var(--ink); font: 14px/1.45 "Helvetica Neue", Helvetica, Arial, sans-serif; }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 24px 48px; }
+    h1 { font-size: 22px; font-weight: 600; margin: 0 0 6px; letter-spacing: -0.02em; }
+    .sub { color: var(--muted); margin-bottom: 20px; }
+    .panel, .card { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+    .grid { display: grid; grid-template-columns: 1.1fr 1.3fr 1.3fr 0.7fr auto; gap: 12px; align-items: end; }
+    .offset { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
+    label { display: block; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+    select, input[type="number"] { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--wash); color: var(--ink); font: inherit; }
+    button { border: 0; border-radius: 8px; padding: 9px 16px; background: var(--pred); color: white; cursor: pointer; font: inherit; }
+    button:disabled { opacity: 0.45; cursor: default; }
+    .scrub { margin-top: 14px; }
+    input[type="range"] { width: 100%; accent-color: var(--pred); }
+    .meta { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .status { min-height: 1.2em; color: var(--muted); font-size: 12px; margin-top: 10px; }
+    .card { margin-top: 16px; }
+    .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--muted); }
+    #preview, #roll3d { height: 440px; width: 100%; }
+    .toggles { display: flex; gap: 16px; flex-wrap: wrap; margin: 8px 0 4px; color: var(--ink); font-size: 13px; }
+    .toggles input { accent-color: var(--pred); }
+    .axis-key { display: flex; gap: 14px; color: var(--muted); font-size: 12px; margin-top: 6px; }
+    .sw { display: inline-block; width: 14px; height: 3px; margin-right: 6px; vertical-align: middle; }
+    .plots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 8px; }
+    .plot { border: 1px solid var(--line); border-radius: 10px; padding: 4px; background: #fff; }
+    .plot .chart { height: 160px; }
+    .empty { color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>IDSIA Melon rollout</h1>
+    <div class="sub">Scrub a start on the Melon path. Rollout compares two models in 3D. Channel plots cover the same window.</div>
+    <div class="panel">
+      <div class="grid">
+        <div>
+          <label for="flight">Melon trajectory</label>
+          <select id="flight"></select>
+        </div>
+        <div>
+          <label for="modelA">Model A</label>
+          <select id="modelA"></select>
+        </div>
+        <div>
+          <label for="modelB">Model B</label>
+          <select id="modelB"></select>
+        </div>
+        <div>
+          <label for="window">Window (s)</label>
+          <input id="window" type="number" min="0.5" max="8" step="0.1" value="2" />
+        </div>
+        <div>
+          <button id="go" type="button">Rollout</button>
+        </div>
+      </div>
+      <div class="offset">
+        <div>
+          <label for="dx">Δx from GT (m)</label>
+          <input id="dx" type="number" step="0.1" value="0" />
+        </div>
+        <div>
+          <label for="dy">Δy from GT (m)</label>
+          <input id="dy" type="number" step="0.1" value="0" />
+        </div>
+        <div>
+          <label for="dz">Δz from GT (m)</label>
+          <input id="dz" type="number" step="0.1" value="0" />
+        </div>
+      </div>
+      <div class="scrub">
+        <label for="start">Start <span id="startLabel">0.0 s</span></label>
+        <input id="start" type="range" min="0" max="1" step="0.01" value="0" />
+        <div class="meta"><span>0 s</span><span id="endLabel">0 s</span></div>
+      </div>
+      <div class="status" id="status"></div>
+    </div>
+
+    <div class="card">
+      <h2>Collection (scrub start)</h2>
+      <div id="preview"></div>
+      <div class="axis-key">
+        <span><i class="sw" style="background:#e11d48"></i>F forward</span>
+        <span><i class="sw" style="background:#16a34a"></i>L left</span>
+        <span><i class="sw" style="background:#2563eb"></i>U up</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Rollout segment</h2>
+      <div class="toggles">
+        <label style="text-transform:none;letter-spacing:0;margin:0"><input type="checkbox" id="showLead" checked /> Lead-in (1 s)</label>
+        <label style="text-transform:none;letter-spacing:0;margin:0"><input type="checkbox" id="showVicon" checked /> Ground truth</label>
+        <label style="text-transform:none;letter-spacing:0;margin:0"><input type="checkbox" id="showA" checked /> <span id="labA">Model A</span></label>
+        <label style="text-transform:none;letter-spacing:0;margin:0"><input type="checkbox" id="showB" checked /> <span id="labB">Model B</span></label>
+        <label style="text-transform:none;letter-spacing:0;margin:0"><input type="checkbox" id="showAxes" checked /> drone_axes</label>
+      </div>
+      <div id="roll3d"></div>
+      <div class="empty" id="rollEmpty">Hit rollout to compare the two models from the start marker.</div>
+    </div>
+
+    <div class="card">
+      <h2>Channels · same window as rollout (p, rpy, v, ω)</h2>
+      <div class="empty" id="plotEmpty">These fill after a rollout.</div>
+      <div class="plots" id="plots"></div>
+    </div>
+  </div>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const CHANNELS = ["x","y","z","roll","pitch","yaw","vx","vy","vz","wx","wy","wz"];
+    const AXIS = { gridcolor: "#e6eef6", zeroline: false, showbackground: false, color: "#5b7aa0" };
+    const OPTS = { responsive: true, displayModeBar: false };
+    let flight = null;
+    let previewReady = false;
+    let rollReady = false;
+    let lastRoll = null;
+
+    function setStatus(t) { $("status").textContent = t || ""; }
+    function startIndex() {
+      if (!flight) return 0;
+      return Math.min(flight.x.length - 2, Math.round(Number($("start").value) / flight.dt));
+    }
+    function scene(camera) {
+      return {
+        aspectmode: "data",
+        xaxis: Object.assign({ title: "x (m)" }, AXIS),
+        yaxis: Object.assign({ title: "y (m)" }, AXIS),
+        zaxis: Object.assign({ title: "z (m)" }, AXIS),
+        camera: camera || { eye: { x: 1.6, y: 1.4, z: 0.9 } },
+      };
+    }
+    function line3(x, y, z, color, width, name, extra) {
+      extra = extra || {};
+      const line = { color, width };
+      if (extra.dash) { line.dash = extra.dash; delete extra.dash; }
+      return Object.assign({ type: "scatter3d", mode: "lines", x, y, z, line, name, hoverinfo: "skip" }, extra);
+    }
+    function triad(s) {
+      const p = [flight.x[s], flight.y[s], flight.z[s]];
+      const segs = [
+        { name: "F", color: "#e11d48", d: [flight.fx[s], flight.fy[s], flight.fz[s]] },
+        { name: "L", color: "#16a34a", d: [flight.lx[s], flight.ly[s], flight.lz[s]] },
+        { name: "U", color: "#2563eb", d: [flight.ux[s], flight.uy[s], flight.uz[s]] },
+      ];
+      return segs.map((a) => line3(
+        [p[0], p[0] + a.d[0]], [p[1], p[1] + a.d[1]], [p[2], p[2] + a.d[2]],
+        a.color, 6, a.name
+      ));
+    }
+
+    function drawPreview() {
+      if (!flight) return;
+      const s = startIndex();
+      const stride = 5;
+      const x = [], y = [], z = [];
+      for (let i = 0; i < flight.x.length; i += stride) {
+        x.push(flight.x[i]); y.push(flight.y[i]); z.push(flight.z[i]);
+      }
+      const cam = previewReady && $("preview").layout ? $("preview").layout.scene.camera : null;
+      const data = [
+        line3(x, y, z, "#111827", 4, "Ground truth"),
+        { type: "scatter3d", mode: "markers", x: [flight.x[s]], y: [flight.y[s]], z: [flight.z[s]], marker: { size: 5, color: "#111827" }, name: "start" },
+        ...triad(s),
+      ];
+      const layout = { margin: { l: 0, r: 0, t: 8, b: 0 }, height: 440, paper_bgcolor: "#fff", showlegend: false, scene: scene(cam) };
+      if (!previewReady) { Plotly.newPlot("preview", data, layout, OPTS); previewReady = true; }
+      else Plotly.react("preview", data, layout, OPTS);
+    }
+
+    function restyleStart() {
+      if (!flight || !previewReady) return;
+      const s = startIndex();
+      const p = [flight.x[s], flight.y[s], flight.z[s]];
+      const axes = [
+        [flight.fx[s], flight.fy[s], flight.fz[s]],
+        [flight.lx[s], flight.ly[s], flight.lz[s]],
+        [flight.ux[s], flight.uy[s], flight.uz[s]],
+      ];
+      Plotly.restyle("preview", { x: [[p[0]]], y: [[p[1]]], z: [[p[2]]] }, [1]);
+      axes.forEach((d, i) => {
+        Plotly.restyle("preview", {
+          x: [[p[0], p[0] + d[0]]],
+          y: [[p[1], p[1] + d[1]]],
+          z: [[p[2], p[2] + d[2]]],
+        }, [2 + i]);
+      });
+    }
+
+    function droneAxesTraces(samples, visible) {
+      return [
+        { key: "f", color: "#e11d48" },
+        { key: "l", color: "#16a34a" },
+        { key: "u", color: "#2563eb" },
+      ].map((axis) => {
+        const x = [], y = [], z = [];
+        const n = samples.p.x.length;
+        for (let i = 0; i < n; i++) {
+          x.push(samples.p.x[i], samples.p.x[i] + samples[axis.key].x[i], null);
+          y.push(samples.p.y[i], samples.p.y[i] + samples[axis.key].y[i], null);
+          z.push(samples.p.z[i], samples.p.z[i] + samples[axis.key].z[i], null);
+        }
+        return line3(x, y, z, axis.color, 4, axis.key.toUpperCase(), { visible, showlegend: false });
+      });
+    }
+
+    function drawRoll() {
+      if (!lastRoll) return;
+      $("rollEmpty").style.display = "none";
+      const cam = rollReady && $("roll3d").layout ? $("roll3d").layout.scene.camera : null;
+      const showAxes = $("showAxes").checked;
+      const data = [
+        line3(lastRoll.leadin.x, lastRoll.leadin.y, lastRoll.leadin.z, "#9ca3af", 3, "Lead-in", { visible: $("showLead").checked, opacity: 0.4 }),
+        line3(lastRoll.vicon.x, lastRoll.vicon.y, lastRoll.vicon.z, "#111827", 5, "Ground truth", { visible: $("showVicon").checked }),
+        line3(lastRoll.a.x, lastRoll.a.y, lastRoll.a.z, "#dc2626", 5, lastRoll.labels[0], { visible: $("showA").checked, dash: "dot" }),
+        line3(lastRoll.b.x, lastRoll.b.y, lastRoll.b.z, "#38bdf8", 5, lastRoll.labels[1], { visible: $("showB").checked, dash: "dot" }),
+        ...droneAxesTraces(lastRoll.drone_axes.vicon, showAxes && $("showVicon").checked),
+        ...droneAxesTraces(lastRoll.drone_axes.a, showAxes && $("showA").checked),
+        ...droneAxesTraces(lastRoll.drone_axes.b, showAxes && $("showB").checked),
+      ];
+      const layout = { margin: { l: 0, r: 0, t: 8, b: 0 }, height: 440, paper_bgcolor: "#fff", legend: { orientation: "h" }, scene: scene(cam) };
+      if (!rollReady) { Plotly.newPlot("roll3d", data, layout, OPTS); rollReady = true; }
+      else Plotly.react("roll3d", data, layout, OPTS);
+    }
+
+    function drawChannels(channels) {
+      $("plotEmpty").style.display = "none";
+      const plots = $("plots");
+      plots.innerHTML = "";
+      for (const name of CHANNELS) {
+        const row = channels[name];
+        const box = document.createElement("div");
+        box.className = "plot";
+        const div = document.createElement("div");
+        div.className = "chart";
+        div.id = "ch_" + name;
+        box.appendChild(div);
+        plots.appendChild(box);
+        Plotly.newPlot(div, [
+          { x: row.t, y: row.vicon, name: "Ground truth", line: { color: "#111827", width: 2 }, hoverinfo: "skip" },
+          { x: row.t, y: row.a, name: lastRoll.labels[0], line: { color: "#dc2626", width: 2, dash: "dot" }, hoverinfo: "skip" },
+          { x: row.t, y: row.b, name: lastRoll.labels[1], line: { color: "#38bdf8", width: 2, dash: "dot" }, hoverinfo: "skip" },
+        ], {
+          title: { text: name, font: { size: 12, color: "#5b7aa0" } },
+          margin: { l: 36, r: 8, t: 28, b: 28 },
+          height: 160,
+          paper_bgcolor: "#fff",
+          plot_bgcolor: "#fff",
+          showlegend: false,
+          xaxis: { title: "t (s)", color: "#5b7aa0", gridcolor: "#eef3f8" },
+          yaxis: { color: "#5b7aa0", gridcolor: "#eef3f8", zeroline: false },
+        }, OPTS);
+      }
+    }
+
+    async function loadFlight() {
+      const name = $("flight").value;
+      flight = await (await fetch("/api/flight?name=" + encodeURIComponent(name))).json();
+      $("start").max = flight.duration.toFixed(2);
+      $("start").step = flight.dt;
+      $("start").value = "0";
+      $("endLabel").textContent = flight.duration.toFixed(1) + " s";
+      $("startLabel").textContent = "0.0 s";
+      previewReady = false;
+      drawPreview();
+    }
+
+    async function rollout() {
+      setStatus("rolling out…");
+      $("go").disabled = true;
+      try {
+        const res = await fetch("/api/rollout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            flight: $("flight").value,
+            model_a: $("modelA").value,
+            model_b: $("modelB").value,
+            start_s: Number($("start").value),
+            window_s: Number($("window").value),
+            dx: Number($("dx").value) || 0,
+            dy: Number($("dy").value) || 0,
+            dz: Number($("dz").value) || 0,
+          }),
+        });
+        const data = await res.json();
+        if (data.error) { setStatus(data.error); return; }
+        lastRoll = data;
+        $("labA").textContent = data.labels[0];
+        $("labB").textContent = data.labels[1];
+        drawRoll();
+        drawChannels(data.channels);
+        setStatus("done");
+      } catch (err) {
+        setStatus(String(err));
+      } finally {
+        $("go").disabled = false;
+      }
+    }
+
+    $("start").addEventListener("input", () => {
+      $("startLabel").textContent = Number($("start").value).toFixed(2) + " s";
+      restyleStart();
+    });
+    $("flight").addEventListener("change", loadFlight);
+    $("go").addEventListener("click", rollout);
+    ["showLead", "showVicon", "showA", "showB", "showAxes"].forEach((id) => $(id).addEventListener("change", drawRoll));
+    window.addEventListener("resize", () => {
+      if (previewReady) Plotly.Plots.resize("preview");
+      if (rollReady) Plotly.Plots.resize("roll3d");
+    });
+
+    (async function init() {
+      const models = (await (await fetch("/api/models")).json()).models;
+      for (const sel of [$("modelA"), $("modelB")]) {
+        for (const m of models) {
+          const opt = document.createElement("option");
+          opt.value = m.id; opt.textContent = m.label;
+          sel.appendChild(opt);
+        }
+      }
+      if (models.length > 1) $("modelB").selectedIndex = Math.min(1, models.length - 1);
+      const flights = (await (await fetch("/api/flights")).json()).flights;
+      for (const f of flights) {
+        const opt = document.createElement("option");
+        opt.value = f.name; opt.textContent = f.name;
+        $("flight").appendChild(opt);
+      }
+      if (flights.length) await loadFlight();
+    })();
+  </script>
+</body>
+</html>

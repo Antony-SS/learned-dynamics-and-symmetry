@@ -18,3 +18,5 @@ unicycle/experiments/visualizations/gifs/
 *.png
 *.pt
 *.html
+!unicycle/experiments/visualizations/interactive/index.html
+!quadrotor/idsia/visualizations/interactive/index.html

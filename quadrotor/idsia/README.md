@@ -81,8 +81,9 @@ python -m quadrotor.idsia.data.fetch
 python -m quadrotor.idsia.train.phys_quotient --seed 0
 python -m quadrotor.idsia.eval.phys_quotient --all
 python -m quadrotor.idsia.eval.baselines
+python -m quadrotor.idsia.visualizations.interactive
 ```
 
 `--all` evaluates every seed that already has a checkpoint. Checkpoints: `runs/quadrotor/<family>/seed_k/{best.pt,last.pt}` (also `idsia/out/runs/`). Melon MAE: `idsia/out/eval/<family>/seed_k/{mae.json,predictions.npz}`.
 
-`train/train.ipynb` trains one seed (resumes `last.pt`). `eval/results.ipynb` prints the Melon table at h=1 / 10 / 50.
+`train/train.ipynb` trains one seed (resumes `last.pt`). `eval/results.ipynb` prints the Melon table at h=1 / 10 / 50. `visualizations/interactive` is a local Melon page: two models, start scrubber, gif window, 0.5 s channel plots.

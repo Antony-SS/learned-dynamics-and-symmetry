@@ -9,7 +9,7 @@ import numpy as np
 import torch
 
 from quadrotor.geometry import train_device
-from quadrotor.idsia.baselines.published import _windows, fit_canonical_scalers, fit_scalers, fit_world_scalers
+from quadrotor.idsia.baselines.published import _windows, fit_canonical_scalers, fit_scalers
 from quadrotor.idsia.data.load import load_idsia_prepared
 from quadrotor.idsia.train.models import make_model
 from quadrotor.idsia.utils.idsia_training_reproduction_params import (
@@ -36,9 +36,7 @@ def snapshot(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
 
-def _feature_stats(family: str, flights):
-    if family == "quad_dynamics":
-        return fit_world_scalers(flights)
+def _feature_stats(_family: str, flights):
     return fit_canonical_scalers(flights)
 
 

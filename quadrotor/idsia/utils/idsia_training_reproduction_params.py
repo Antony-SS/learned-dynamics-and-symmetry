@@ -25,10 +25,10 @@ OUT = Path(__file__).resolve().parents[1] / "out"
 RUNS = OUT / "runs"
 EVAL = OUT / "eval"
 
-QUAD_DYNAMICS = "quad_dynamics"
+SYM_QUAD_DYNAMICS = "sym_quad_dynamics"
 PHYS_QUOTIENT = "phys_quotient"
 PHYS_QUOTIENT_SYM = "phys_quotient_sym"
-FAMILIES = (QUAD_DYNAMICS, PHYS_QUOTIENT, PHYS_QUOTIENT_SYM)
+FAMILIES = (PHYS_QUOTIENT, PHYS_QUOTIENT_SYM, SYM_QUAD_DYNAMICS)
 
 
 def run_dir(family: str, seed: int) -> Path:

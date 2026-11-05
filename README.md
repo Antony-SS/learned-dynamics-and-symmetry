@@ -16,7 +16,7 @@ From this directory, in an environment with PyTorch:
 
 ```bash
 python -m quadrotor.idsia.data.fetch
-python -m quadrotor.idsia.train.quad_dynamics --seed 0
+python -m quadrotor.idsia.train.sym_quad_dynamics --seed 0
 ```
 
 Open `unicycle/dynamics.ipynb` or `quadrotor/idsia/train/train.ipynb`.

@@ -6,7 +6,7 @@ from quadrotor.idsia.utils.idsia_training_reproduction_params import (
     KEYS,
     PHYS_QUOTIENT,
     PHYS_QUOTIENT_SYM,
-    QUAD_DYNAMICS,
+    SYM_QUAD_DYNAMICS,
 )
 
 __all__ = [
@@ -15,5 +15,5 @@ __all__ = [
     "KEYS",
     "PHYS_QUOTIENT",
     "PHYS_QUOTIENT_SYM",
-    "QUAD_DYNAMICS",
+    "SYM_QUAD_DYNAMICS",
 ]

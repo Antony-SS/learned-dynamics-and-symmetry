@@ -14,20 +14,21 @@ dependencies = [
     "matplotlib",
     "pandas",
     "plotly",
+    "pillow",
+    "jupyter",
+    "ipykernel",
 ]
 
-[tool.setuptools]
-packages = [
-    "learned_dynamics",
-    "unicycle",
-    "unicycle.experiments",
-    "unicycle.experiments.train",
-    "unicycle.experiments.eval",
-    "unicycle.experiments.utils",
-    "quadrotor",
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+where = [".", "src"]
+include = ["learned_dynamics*", "unicycle*", "quadrotor*"]
+exclude = [
+    "quadrotor.idsia.nanodrone-sysid-benchmark*",
+    "quadrotor.idsia.out*",
 ]
 
 [tool.setuptools.package-dir]
 learned_dynamics = "src/learned_dynamics"
-unicycle = "unicycle"
-quadrotor = "quadrotor"

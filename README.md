@@ -15,10 +15,10 @@ Supervised learning of raw robot dynamics. The network predicts the observed ste
 From this directory, in an environment with PyTorch:
 
 ```bash
-python -m quadrotor.idsia.fetch
-python -m quadrotor.idsia.train_quad_dynamics --seed 0
+python -m quadrotor.idsia.data.fetch
+python -m quadrotor.idsia.train.quad_dynamics --seed 0
 ```
 
-Open `unicycle/dynamics.ipynb` or `quadrotor/idsia/train.ipynb`.
+Open `unicycle/dynamics.ipynb` or `quadrotor/idsia/train/train.ipynb`.
 
 The IDSIA benchmark is from Busetto et al., *Control Engineering Practice* 172 (2026), 106871.

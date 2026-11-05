@@ -17,7 +17,15 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["learned_dynamics", "unicycle", "quadrotor"]
+packages = [
+    "learned_dynamics",
+    "unicycle",
+    "unicycle.experiments",
+    "unicycle.experiments.train",
+    "unicycle.experiments.eval",
+    "unicycle.experiments.utils",
+    "quadrotor",
+]
 
 [tool.setuptools.package-dir]
 learned_dynamics = "src/learned_dynamics"

@@ -11,17 +11,20 @@ import torch
 from quadrotor.geometry import train_device
 from quadrotor.idsia.baselines.published import _windows, fit_canonical_scalers, fit_scalers
 from quadrotor.idsia.data.load import load_idsia_prepared
+from quadrotor.idsia.baselines.published import PhysQuadModel, PhysResQuadModel, ResidualQuadModel
 from quadrotor.idsia.train.models import make_model
 from quadrotor.idsia.utils.idsia_training_reproduction_params import (
     BATCH,
     EPOCHS,
     HORIZON,
+    PHYS_RES,
     LR_END,
     LR_START,
     SCHED_T,
     STRIDE,
     n_params,
     run_dir,
+    run_roots,
     scaled_loss,
     time_weights,
 )
@@ -165,8 +168,22 @@ def train_family(
     return model
 
 
+def _load_phys_res(seed: int, device: torch.device) -> torch.nn.Module:
+    path = run_dir(PHYS_RES, seed) / "best.pt"
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    model = PhysResQuadModel(PhysQuadModel(zero_omega_dot=True), ResidualQuadModel(hidden_dim=64, num_layers=5))
+    model.load_state_dict(payload["state"], strict=False)
+    model.to(device)
+    model.eval()
+    return model
+
+
 def load_trained(family: str, seed: int, device: torch.device | None = None, symmetric: bool = True) -> torch.nn.Module:
     device = train_device() if device is None else device
+    if family == PHYS_RES:
+        return _load_phys_res(seed, device)
     path = run_dir(family, seed) / "best.pt"
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -181,11 +198,12 @@ def load_trained(family: str, seed: int, device: torch.device | None = None, sym
 
 
 def list_seeds(family: str) -> list[int]:
-    folder = run_dir(family, 0).parent
-    if not folder.is_dir():
-        return []
-    seeds = []
-    for child in sorted(folder.glob("seed_*")):
-        if (child / "best.pt").is_file():
-            seeds.append(int(child.name.split("_")[1]))
-    return seeds
+    seeds: set[int] = set()
+    for root in run_roots():
+        folder = root / family
+        if not folder.is_dir():
+            continue
+        for child in folder.glob("seed_*"):
+            if (child / "best.pt").is_file():
+                seeds.add(int(child.name.split("_")[1]))
+    return sorted(seeds)

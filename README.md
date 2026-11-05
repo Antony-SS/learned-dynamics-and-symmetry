@@ -5,9 +5,9 @@ Supervised learning of raw robot dynamics. The network predicts the observed ste
 ## Layout
 
 - `src/learned_dynamics`: MLP and the full-batch trainer. The saved epoch is the one with the lowest held-out open-loop position error.
-- `unicycle`: Robotarium ground robots. Notebooks in this folder; CLI trainers in `unicycle/scripts/`.
+- `unicycle`: SE(2) geometry and leftover wrappers. Robotarium experiments (`naive`, `quotient`, `quotient_aug`, `quotient_sym`, plus the analytic unicycle) live in `unicycle/experiments/`.
 - `quadrotor/flight.py` and `quadrotor/geometry.py`: `PreparedFlight` and SO(3) / kinematics. `quadrotor/evaluate.py` is the open-loop MAE helper.
-- `quadrotor/idsia`: Busetto et al. Crazyflie sys-id. Three one-step leftovers we train (world / quotient / quotient+orbit around a body residual MLP) plus their published physics / phys+res. CLIs and notebooks live in that folder.
+- `quadrotor/idsia`: Busetto et al. Crazyflie sys-id. Three leftovers we train plus their published physics / phys+res.
 - Data stay under gitignored `data/`. Old one-off checkpoints remain in gitignored `runs/`.
 
 ## Run
@@ -19,6 +19,6 @@ python -m quadrotor.idsia.data.fetch
 python -m quadrotor.idsia.train.sym_quad_dynamics --seed 0
 ```
 
-Open `unicycle/dynamics.ipynb` or `quadrotor/idsia/train/train.ipynb`.
+Open `unicycle/experiments/train/train.ipynb` or `quadrotor/idsia/train/train.ipynb`.
 
 The IDSIA benchmark is from Busetto et al., *Control Engineering Practice* 172 (2026), 106871.

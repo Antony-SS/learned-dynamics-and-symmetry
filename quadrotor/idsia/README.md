@@ -10,7 +10,7 @@ Every leftover we train writes the same **body** 12-D increment `(Δp, Δv, Δθ
 
 ## Ours vs. Theirs
 
-Melon MAE at h = 1 / 10 / 50 on position, rotation, velocity, ω. Theirs are loaded, not retrained. We first keep their analytic RK4 and change only the leftover (quotient, then quotient + Z₂×Z₂). `SymmetryQuadDynamicsNet` is a separate test: drop their vehicle model and rely on symmetry alone.
+Melon MAE at h = 1 / 10 / 50 on position, rotation, velocity, ω. Analytic physics is the only published/loaded baseline. Their phys+res architecture we retrain ourselves (`runs/quadrotor/phys_res/`, 5 seeds) — the official checkpoint was undertrained. We then keep their analytic RK4 and change only the leftover (quotient, then quotient + Z₂×Z₂). `SymmetryQuadDynamicsNet` is a separate test: drop their vehicle model and rely on symmetry alone.
 
 ### Their baselines
 
@@ -28,13 +28,11 @@ Analytic Crazyflie rigid body, RK4, `dt = 0.01`. Motors (rad/s) map to thrust an
 
 #### Physics + residual (their leftover)
 
-Frozen copy of the physics above, plus an MLP on the **normalized world** chart. The leftover **adds in that chart** (world `Δx`), not in the body.
+Frozen copy of the physics above, plus an MLP on the **normalized world** chart.  We reproduced their published numbers, and did slightly better (theirs was actually slightly undertrained).  
 
 - **Input:** normalized `(p, v, Log R, ω)` and normalized `Ω` (16-D concat) where normalization is done per channel on the training data.  This is standard.
 - **Output:** `x_phys + Δx` in the same normalized world chart, then denormalized.
-- **Measures:** their published “physics is almost right; learn the error” number. Checkpoint: `phys+res_random_square_chirp.pt`. Our 5-seed recipe copy lives in `runs/quadrotor/phys_res/` for a variance bar; do not treat that as a new architecture.
-
-
+- **Measures:** their leftover, trained with their recipe (5 seeds). Table uses `runs/quadrotor/phys_res/` which are our trained reproductions, which fair slightly better than their published`phys+res_random_square_chirp.pt`.
 
 ### Our trained models
 
@@ -48,6 +46,8 @@ Their analytic RK4, leftover on the quotient, **no** morphological average. Firs
 - **Output:** body residual **added after** frozen RK4.
 - **Measures:** does a body leftover on the quotient beat their world-chart phys+res, holding physics fixed?
 
+
+
 #### `PhysQuotientSym` (`phys_quotient_sym`)
 
 Same as `PhysQuotient`, plus Z₂×Z₂ Reynolds averaging on the residual.
@@ -55,6 +55,8 @@ Same as `PhysQuotient`, plus Z₂×Z₂ Reynolds averaging on the residual.
 - **Input:** 13-D quotient, four xz/yz mirrors.
 - **Output:** orbit-averaged body residual after frozen RK4.
 - **Measures:** does morphological symmetry still help once physics is already in the loop?
+
+
 
 #### `SymmetryQuadDynamicsNet` (`sym_quad_dynamics`)
 
@@ -64,13 +66,15 @@ No Crazyflie force/torque model. The net predicts the whole step; we only enforc
 - **Output:** body `(Δp, Δv, Δθ, Δω)`, integrated from the **current** state (`apply_body_dx` with no RK4).
 - **Measures:** can quotient + Z₂×Z₂ match (or beat) their analytic physics **without** mass, inertia, or motor mixing?
 
-| family | class | prior | input | output |
-| --- | --- | --- | --- | --- |
-| (loaded) | `PhysQuadModel` | analytic RK4 | world 12-D + `Ω` | next world 12-D |
-| (loaded) | `PhysResQuadModel` | RK4 + world leftover | norm. world 12-D + `Ω` | world `x_phys + Δx` |
-| `phys_quotient` | `PhysQuotient` | RK4 + leftover | quotient 13-D | body 12-D after RK4 |
-| `phys_quotient_sym` | `PhysQuotientSym` | RK4 + leftover | quotient 13-D, orbit | body 12-D after RK4 |
-| `sym_quad_dynamics` | `SymmetryQuadDynamicsNet` | rigid-body Exp only | quotient 13-D, orbit | body 12-D from current state |
+
+| family              | class                     | prior                | input                  | output                       |
+| ------------------- | ------------------------- | -------------------- | ---------------------- | ---------------------------- |
+| (loaded)            | `PhysQuadModel`           | analytic RK4         | world 12-D + `Ω`       | next world 12-D              |
+| `phys_res`          | `PhysResQuadModel`        | RK4 + world leftover | norm. world 12-D + `Ω` | world `x_phys + Δx`          |
+| `phys_quotient`     | `PhysQuotient`            | RK4 + leftover       | quotient 13-D          | body 12-D after RK4          |
+| `phys_quotient_sym` | `PhysQuotientSym`         | RK4 + leftover       | quotient 13-D, orbit   | body 12-D after RK4          |
+| `sym_quad_dynamics` | `SymmetryQuadDynamicsNet` | rigid-body Exp only  | quotient 13-D, orbit   | body 12-D from current state |
+
 
 ```bash
 python -m quadrotor.idsia.data.fetch
@@ -79,6 +83,6 @@ python -m quadrotor.idsia.eval.phys_quotient --all
 python -m quadrotor.idsia.eval.baselines
 ```
 
-`--all` evaluates every seed that already has a checkpoint. Checkpoints: `out/runs/<family>/seed_k/{best.pt,last.pt}`. Melon MAE: `out/eval/<family>/seed_k/{mae.json,predictions.npz}`.
+`--all` evaluates every seed that already has a checkpoint. Checkpoints: `runs/quadrotor/<family>/seed_k/{best.pt,last.pt}` (also `idsia/out/runs/`). Melon MAE: `idsia/out/eval/<family>/seed_k/{mae.json,predictions.npz}`.
 
 `train/train.ipynb` trains one seed (resumes `last.pt`). `eval/results.ipynb` prints the Melon table at h=1 / 10 / 50.

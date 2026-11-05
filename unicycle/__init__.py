@@ -1,1 +1,1 @@
-"""Robotarium unicycle dynamics, supervised under SE(2) canonicalizations."""
+"""SE(2) geometry and leftover wrappers. Robotarium runs live in ``experiments/``."""

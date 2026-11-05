@@ -12,6 +12,8 @@ dist/
 build/
 quadrotor/runs/
 quadrotor/idsia/out/
+unicycle/experiments/out/
+unicycle/experiments/visualizations/
 *.png
 *.pt
 *.html

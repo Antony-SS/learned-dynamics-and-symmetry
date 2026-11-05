@@ -22,17 +22,29 @@ HS = (0, 9, 49)
 KEYS = ("position", "rotation", "velocity", "omega")
 
 OUT = Path(__file__).resolve().parents[1] / "out"
-RUNS = OUT / "runs"
+# Existing trainings live at repo ``runs/quadrotor``. Also accept ``idsia/out/runs``.
+_REPO_RUNS = Path(__file__).resolve().parents[3] / "runs" / "quadrotor"
+RUNS = _REPO_RUNS
 EVAL = OUT / "eval"
 
-SYM_QUAD_DYNAMICS = "sym_quad_dynamics"
-PHYS_QUOTIENT = "phys_quotient"
-PHYS_QUOTIENT_SYM = "phys_quotient_sym"
-FAMILIES = (PHYS_QUOTIENT, PHYS_QUOTIENT_SYM, SYM_QUAD_DYNAMICS)
+
+def run_roots() -> tuple[Path, ...]:
+    return (_REPO_RUNS, OUT / "runs")
 
 
 def run_dir(family: str, seed: int) -> Path:
-    return RUNS / family / f"seed_{int(seed)}"
+    for root in run_roots():
+        folder = root / family / f"seed_{int(seed)}"
+        if (folder / "best.pt").is_file() or (folder / "last.pt").is_file():
+            return folder
+    return _REPO_RUNS / family / f"seed_{int(seed)}"
+
+PHYS_RES = "phys_res"
+SYM_QUAD_DYNAMICS = "sym_quad_dynamics"
+PHYS_QUOTIENT = "phys_quotient"
+PHYS_QUOTIENT_SYM = "phys_quotient_sym"
+TRAIN_FAMILIES = (PHYS_QUOTIENT, PHYS_QUOTIENT_SYM, SYM_QUAD_DYNAMICS)
+FAMILIES = (PHYS_RES,) + TRAIN_FAMILIES
 
 
 def eval_dir(family: str, seed: int) -> Path:

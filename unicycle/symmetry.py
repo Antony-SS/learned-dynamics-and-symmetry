@@ -1,7 +1,8 @@
 """Quotient features, Z₂ orbit, and the body increment lift.
 
 Tables live here once. Residual MLPs stay geometry-free: they write body
-``(Δx, Δy, Δθ)``. Polar parts are lifted by the current heading.
+``(Δx, Δy, Δθ, Δv, Δω)``. Polar pose parts lift through the current heading;
+rates add in the body.
 """
 
 from __future__ import annotations
@@ -10,15 +11,10 @@ import torch
 import torch.nn as nn
 
 # Two Z₂ elements: identity, then left–right (reflect through the body xz plane).
-# Polar (v, Δx, Δy): v and Δx stay; Δy flips.
-# Axial / pseudo (ω, Δθ, ω_cmd): pick up det = −1.
-# Wheel slots stay (left, right); the second row swaps them.
+# Polar (v, Δx, Δy, Δv): v, Δx, Δv stay; Δy flips.
+# Axial / pseudo (ω, Δθ, Δω, ω_cmd): pick up det = −1.
+# Wheel swap (left, right) → (right, left) is exactly “v stays, ω flips”.
 BASE_LENGTH = 0.105
-ORBIT_VW = (
-    (1.0, 1.0),
-    (1.0, -1.0),
-)
-ORBIT_WHEELS = ((0, 1), (1, 0))
 ORBIT_POLAR = (
     (1.0, 1.0),
     (1.0, -1.0),
@@ -28,14 +24,19 @@ ORBIT_AXIAL = (
     (-1.0,),
 )
 N_ORBIT = 2
+# Quotient row (v, ω, v_cmd, ω_cmd) and body leftover (Δx, Δy, Δθ, Δv, Δω).
+ORBIT_FEAT_SIGN = (
+    (1.0, 1.0, 1.0, 1.0),
+    (1.0, -1.0, 1.0, -1.0),
+)
+ORBIT_DX_SIGN = (
+    (1.0, 1.0, 1.0, 1.0, 1.0),
+    (1.0, -1.0, -1.0, 1.0, -1.0),
+)
 
 
 def wrap_angle(angle: torch.Tensor) -> torch.Tensor:
     return (angle + torch.pi) % (2.0 * torch.pi) - torch.pi
-
-
-def _as_orbit_tensor(table, device, dtype, long: bool = False) -> torch.Tensor:
-    return torch.tensor(table, device=device, dtype=torch.long if long else dtype)
 
 
 def twist_to_wheels(vw: torch.Tensor) -> torch.Tensor:
@@ -52,14 +53,23 @@ def wheels_to_twist(wheels: torch.Tensor) -> torch.Tensor:
     )
 
 
-def apply_body_dx(pose: torch.Tensor, dx_body: torch.Tensor) -> torch.Tensor:
-    """``T ∘ Exp(Δ)`` with ``dx_body = (Δx, Δy, Δθ)`` already a finite step."""
+def apply_pose_dx(pose: torch.Tensor, dx_pose: torch.Tensor) -> torch.Tensor:
+    """``T ∘ Exp(Δ)`` with ``dx_pose = (Δx, Δy, Δθ)`` already a finite step."""
     cosine = torch.cos(pose[..., 2])
     sine = torch.sin(pose[..., 2])
-    x = pose[..., 0] + cosine * dx_body[..., 0] - sine * dx_body[..., 1]
-    y = pose[..., 1] + sine * dx_body[..., 0] + cosine * dx_body[..., 1]
-    theta = wrap_angle(pose[..., 2] + dx_body[..., 2])
+    x = pose[..., 0] + cosine * dx_pose[..., 0] - sine * dx_pose[..., 1]
+    y = pose[..., 1] + sine * dx_pose[..., 0] + cosine * dx_pose[..., 1]
+    theta = wrap_angle(pose[..., 2] + dx_pose[..., 2])
     return torch.stack((x, y, theta), dim=-1)
+
+
+def apply_body_dx(
+    pose: torch.Tensor, rates: torch.Tensor, dx_body: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Add a 5-D body increment. Polar (Δx, Δy) lift through heading; rates add."""
+    next_pose = apply_pose_dx(pose, dx_body[..., 0:3])
+    next_rates = rates + dx_body[..., 3:5]
+    return next_pose, next_rates
 
 
 def physics_body_dx(command: torch.Tensor, dt: float) -> torch.Tensor:
@@ -78,20 +88,10 @@ def quotient_features(rates: torch.Tensor, command: torch.Tensor) -> torch.Tenso
     return torch.cat((rates, command), dim=-1)
 
 
-def _permute_twist(vw: torch.Tensor, wheels_idx: torch.Tensor) -> torch.Tensor:
-    """Apply a wheel permutation to a ``(..., 2)`` twist, batched over the group."""
-    wheels = twist_to_wheels(vw)
-    index = wheels_idx.view(N_ORBIT, *([1] * (wheels.ndim - 1)), 2).expand(N_ORBIT, *wheels.shape)
-    return wheels_to_twist(wheels.unsqueeze(0).expand(N_ORBIT, *wheels.shape).gather(-1, index))
-
-
 def orbit_features(canonical: torch.Tensor) -> torch.Tensor:
     """Stack identity and the left–right image. Shape ``(2, B, 4)``."""
-    device, dtype = canonical.device, canonical.dtype
-    wheels_idx = _as_orbit_tensor(ORBIT_WHEELS, device, dtype, long=True)
-    rates = _permute_twist(canonical[..., 0:2], wheels_idx)
-    command = _permute_twist(canonical[..., 2:4], wheels_idx)
-    return torch.cat((rates, command), dim=-1)
+    signs = canonical.new_tensor(ORBIT_FEAT_SIGN)
+    return canonical.unsqueeze(0) * signs.unsqueeze(1)
 
 
 def apply_orbit_element(canonical: torch.Tensor, index: int) -> torch.Tensor:
@@ -100,11 +100,9 @@ def apply_orbit_element(canonical: torch.Tensor, index: int) -> torch.Tensor:
 
 
 def orbit_body_dx(raw: torch.Tensor) -> torch.Tensor:
-    """Sign-correct a ``(2, B, 3)`` body increment and Reynolds-average."""
-    polar = raw.new_tensor(ORBIT_POLAR).view(N_ORBIT, 1, 2)
-    axial = raw.new_tensor(ORBIT_AXIAL).view(N_ORBIT, 1, 1)
-    signed = torch.cat((raw[..., 0:2] * polar, raw[..., 2:3] * axial), dim=-1)
-    return signed.mean(dim=0)
+    """Sign-correct a ``(2, B, 5)`` body increment and Reynolds-average."""
+    signs = raw.new_tensor(ORBIT_DX_SIGN)
+    return (raw * signs.unsqueeze(1)).mean(dim=0)
 
 
 def mirror_quotient(features: torch.Tensor) -> torch.Tensor:
@@ -112,8 +110,7 @@ def mirror_quotient(features: torch.Tensor) -> torch.Tensor:
 
 
 def mirror_body_dx(dx_body: torch.Tensor) -> torch.Tensor:
-    signs = dx_body.new_tensor((*ORBIT_POLAR[1], *ORBIT_AXIAL[1]))
-    return dx_body * signs
+    return dx_body * dx_body.new_tensor(ORBIT_DX_SIGN[1])
 
 
 class Quotient(nn.Module):
@@ -132,14 +129,16 @@ class WorldFeatures(nn.Module):
 
 
 class Orbit(nn.Module):
-    """Reynolds average of a 4-D → 3-D body increment over the two mirrors."""
+    """Reynolds average: one MLP on identity and the left–right image, then mean."""
 
     def __init__(self, net: nn.Module) -> None:
         super().__init__()
         self.net = net
+        self.register_buffer("feat_sign", torch.tensor(ORBIT_FEAT_SIGN))
+        self.register_buffer("dx_sign", torch.tensor(ORBIT_DX_SIGN))
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         batch = features.shape[0]
-        stacked = orbit_features(features).reshape(N_ORBIT * batch, 4)
-        raw = self.net(stacked).reshape(N_ORBIT, batch, 3)
-        return orbit_body_dx(raw)
+        stacked = (features.unsqueeze(0) * self.feat_sign.unsqueeze(1)).reshape(N_ORBIT * batch, 4)
+        raw = self.net(stacked).reshape(N_ORBIT, batch, 5)
+        return (raw * self.dx_sign.unsqueeze(1)).mean(dim=0)

@@ -21,6 +21,7 @@
     .panel, .card { background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
     .grid { display: grid; grid-template-columns: 1.1fr 1.3fr 1.3fr 0.7fr auto; gap: 12px; align-items: end; }
     .offset { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
+    .note { color: var(--muted); font-size: 12px; line-height: 1.45; margin-top: 10px; }
     label { display: block; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
     select, input[type="number"] { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--wash); color: var(--ink); font: inherit; }
     button { border: 0; border-radius: 8px; padding: 9px 16px; background: var(--pred); color: white; cursor: pointer; font: inherit; }
@@ -36,9 +37,9 @@
     .toggles input { accent-color: var(--pred); }
     .axis-key { display: flex; gap: 14px; color: var(--muted); font-size: 12px; margin-top: 6px; }
     .sw { display: inline-block; width: 14px; height: 3px; margin-right: 6px; vertical-align: middle; }
-    .plots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 8px; }
-    .plot { border: 1px solid var(--line); border-radius: 10px; padding: 4px; background: #fff; }
-    .plot .chart { height: 160px; }
+    .plots { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px 20px; margin-top: 14px; }
+    .plot { border: 1px solid var(--line); border-radius: 10px; padding: 10px 8px 6px; background: #fff; }
+    .plot .chart { height: 210px; }
     .empty { color: var(--muted); font-size: 13px; }
   </style>
 </head>
@@ -82,6 +83,7 @@
           <input id="dz" type="number" step="0.1" value="0" />
         </div>
       </div>
+      <div class="note">Notice that if you choose a model conditioned on world coordinates (like phys_res), the prediction quality degrades if we just perturb by a meter. Try 5 meters of offset and watch it diverge!</div>
       <div class="scrub">
         <label for="start">Start <span id="startLabel">0.0 s</span></label>
         <input id="start" type="range" min="0" max="1" step="0.01" value="0" />
@@ -114,7 +116,7 @@
     </div>
 
     <div class="card">
-      <h2>Channels · same window as rollout (p, rpy, v, ω)</h2>
+      <h2>Channels · same window as rollout</h2>
       <div class="empty" id="plotEmpty">These fill after a rollout.</div>
       <div class="plots" id="plots"></div>
     </div>
@@ -122,7 +124,20 @@
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <script>
     const $ = (id) => document.getElementById(id);
-    const CHANNELS = ["x","y","z","roll","pitch","yaw","vx","vy","vz","wx","wy","wz"];
+    const CHANNELS = [
+      { key: "x", title: "x", unit: "m" },
+      { key: "y", title: "y", unit: "m" },
+      { key: "z", title: "z", unit: "m" },
+      { key: "roll", title: "roll", unit: "rad" },
+      { key: "pitch", title: "pitch", unit: "rad" },
+      { key: "yaw", title: "yaw", unit: "rad" },
+      { key: "vx", title: "vx", unit: "m/s" },
+      { key: "vy", title: "vy", unit: "m/s" },
+      { key: "vz", title: "vz", unit: "m/s" },
+      { key: "wx", title: "ωx", unit: "rad/s" },
+      { key: "wy", title: "ωy", unit: "rad/s" },
+      { key: "wz", title: "ωz", unit: "rad/s" },
+    ];
     const AXIS = { gridcolor: "#e6eef6", zeroline: false, showbackground: false, color: "#5b7aa0" };
     const OPTS = { responsive: true, displayModeBar: false };
     let flight = null;
@@ -173,8 +188,8 @@
       }
       const cam = previewReady && $("preview").layout ? $("preview").layout.scene.camera : null;
       const data = [
-        line3(x, y, z, "#111827", 4, "Ground truth"),
-        { type: "scatter3d", mode: "markers", x: [flight.x[s]], y: [flight.y[s]], z: [flight.z[s]], marker: { size: 5, color: "#111827" }, name: "start" },
+        line3(x, y, z, "#9aa4b2", 3, "Ground truth", { opacity: 0.45 }),
+        { type: "scatter3d", mode: "markers", x: [flight.x[s]], y: [flight.y[s]], z: [flight.z[s]], marker: { size: 5, color: "#6b7280" }, name: "start" },
         ...triad(s),
       ];
       const layout = { margin: { l: 0, r: 0, t: 8, b: 0 }, height: 440, paper_bgcolor: "#fff", showlegend: false, scene: scene(cam) };
@@ -241,13 +256,13 @@
       $("plotEmpty").style.display = "none";
       const plots = $("plots");
       plots.innerHTML = "";
-      for (const name of CHANNELS) {
-        const row = channels[name];
+      for (const ch of CHANNELS) {
+        const row = channels[ch.key];
         const box = document.createElement("div");
         box.className = "plot";
         const div = document.createElement("div");
         div.className = "chart";
-        div.id = "ch_" + name;
+        div.id = "ch_" + ch.key;
         box.appendChild(div);
         plots.appendChild(box);
         Plotly.newPlot(div, [
@@ -255,14 +270,14 @@
           { x: row.t, y: row.a, name: lastRoll.labels[0], line: { color: "#dc2626", width: 2, dash: "dot" }, hoverinfo: "skip" },
           { x: row.t, y: row.b, name: lastRoll.labels[1], line: { color: "#38bdf8", width: 2, dash: "dot" }, hoverinfo: "skip" },
         ], {
-          title: { text: name, font: { size: 12, color: "#5b7aa0" } },
-          margin: { l: 36, r: 8, t: 28, b: 28 },
-          height: 160,
+          title: { text: ch.title + " (" + ch.unit + ")", font: { size: 16, color: "#1a365d", family: "Helvetica Neue, Helvetica, Arial, sans-serif" } },
+          margin: { l: 52, r: 14, t: 42, b: 42 },
+          height: 210,
           paper_bgcolor: "#fff",
           plot_bgcolor: "#fff",
           showlegend: false,
-          xaxis: { title: "t (s)", color: "#5b7aa0", gridcolor: "#eef3f8" },
-          yaxis: { color: "#5b7aa0", gridcolor: "#eef3f8", zeroline: false },
+          xaxis: { title: { text: "t (s)", font: { size: 12, color: "#1a365d" } }, color: "#5b7aa0", gridcolor: "#eef3f8" },
+          yaxis: { title: { text: ch.unit, font: { size: 12, color: "#1a365d" } }, color: "#5b7aa0", gridcolor: "#eef3f8", zeroline: false },
         }, OPTS);
       }
     }

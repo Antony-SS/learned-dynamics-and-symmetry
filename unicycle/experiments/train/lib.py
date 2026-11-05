@@ -17,6 +17,7 @@ from unicycle.experiments.utils.params import (
     HEADING_LENGTH,
     HORIZON_S,
     LR,
+    PATIENCE,
     RUNS,
     n_params,
     run_dir,
@@ -113,6 +114,7 @@ def train_family(
     *,
     device: torch.device | None = None,
     epochs: int = EPOCHS,
+    patience: int = PATIENCE,
 ) -> torch.nn.Module:
     device = train_device() if device is None else device
     torch.manual_seed(int(seed))
@@ -129,12 +131,14 @@ def train_family(
     start_epoch = 1
     curve: list[dict] = []
     best_val = float("inf")
+    stale = 0
     if last_path.is_file():
         payload = torch.load(last_path, map_location="cpu", weights_only=False)
         model.load_state_dict(payload["state"], strict=False)
         opt.load_state_dict(payload["optimizer"])
         curve = list(payload.get("curve", []))
         best_val = float(payload.get("best_val", float("inf")))
+        stale = int(payload.get("stale", 0))
         start_epoch = int(payload["epoch"]) + 1
         print(f"{family}  seed {seed}  resume epoch {start_epoch}  val {best_val:.6f}", flush=True)
     else:
@@ -169,8 +173,11 @@ def train_family(
         mark = ""
         if val_mean < best_val:
             best_val = val_mean
+            stale = 0
             torch.save({"state": snapshot(model), "epoch": epoch, "val": best_val, "seed": seed}, best_path)
             mark = "  saved"
+        else:
+            stale += 1
         curve.append({"epoch": epoch, "train": train_mean, "val": val_mean})
         torch.save(
             {
@@ -179,6 +186,7 @@ def train_family(
                 "epoch": epoch,
                 "curve": curve,
                 "best_val": best_val,
+                "stale": stale,
                 "seed": seed,
                 "family": family,
             },
@@ -186,6 +194,13 @@ def train_family(
         )
         write_json(folder / "curve.json", {"curve": curve, "best_val": best_val})
         print(f"  {family}  seed {seed}  epoch {epoch:02d}  train {train_mean:.6f}  val {val_mean:.6f}{mark}", flush=True)
+        if patience > 0 and stale >= patience:
+            print(
+                f"  {family}  seed {seed}  stop after {epoch} epochs  "
+                f"no val improvement for {patience}",
+                flush=True,
+            )
+            break
 
     payload = torch.load(best_path, map_location="cpu", weights_only=False)
     model.load_state_dict(payload["state"], strict=False)

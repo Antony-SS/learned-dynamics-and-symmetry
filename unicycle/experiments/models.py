@@ -1,4 +1,4 @@
-"""Commanded body-step families. Output is always (Δx, Δy, Δθ)."""
+"""Commanded body-step families. Output is (Δx, Δy, Δθ, Δv, Δω)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from unicycle.symmetry import (
     Quotient,
     WorldFeatures,
     apply_body_dx,
+    apply_pose_dx,
     physics_body_dx,
 )
 
@@ -26,7 +27,7 @@ FAMILIES = (PHYSICS,) + TRAIN_FAMILIES
 
 
 class BodyMlp(nn.Module):
-    """Geometry-free MLP. Writes the full body step (Δx, Δy, Δθ)."""
+    """Geometry-free MLP. Writes body ``(Δx, Δy, Δθ, Δv, Δω)``."""
 
     def __init__(self, in_dim: int, hidden: int = HIDDEN, n_hidden: int = N_HIDDEN) -> None:
         super().__init__()
@@ -36,7 +37,7 @@ class BodyMlp(nn.Module):
             layers += [nn.Linear(dim, hidden), nn.ReLU()]
             dim = int(hidden)
         self.mlp = nn.Sequential(*layers)
-        self.out = nn.Linear(dim, 3)
+        self.out = nn.Linear(dim, 5)
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
@@ -69,10 +70,8 @@ class BodyStep(nn.Module):
         command: torch.Tensor,
         dt: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        dx = self.body_dx(pose, rates, command)
-        next_pose = apply_body_dx(pose, dx)
-        next_rates = torch.stack((dx[..., 0] / dt, dx[..., 2] / dt), dim=-1)
-        return next_pose, next_rates
+        del dt
+        return apply_body_dx(pose, rates, self.body_dx(pose, rates, command))
 
     def rollout(self, pose: torch.Tensor, rates: torch.Tensor, commands: torch.Tensor, dt: float) -> torch.Tensor:
         """Open-loop poses after each command. ``commands`` is (..., T, 2)."""
@@ -99,7 +98,7 @@ class PhysicsUnicycle(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         del rates
         dx = physics_body_dx(command, dt)
-        return apply_body_dx(pose, dx), command
+        return apply_pose_dx(pose, dx), command
 
     def rollout(self, pose: torch.Tensor, rates: torch.Tensor, commands: torch.Tensor, dt: float) -> torch.Tensor:
         preds = []

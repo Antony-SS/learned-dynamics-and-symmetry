@@ -24,14 +24,14 @@ Ideal unicycle on commanded `(v, ω)`: `Δx = v dt`, `Δy = 0`, `Δθ = ω dt`, 
 
 ## Trained families
 
-Same leftover MLP (hidden 32 × 3). Output is always body `(Δx, Δy, Δθ)`. Polar parts rotate with heading.
+Same leftover MLP (hidden 32 × 3). Output is body `(Δx, Δy, Δθ, Δv, Δω)`. Polar pose parts rotate with heading; the next rates are `rates + (Δv, Δω)`.
 
 ### `NaiveUnicycle` (`naive`)
 
 Sees the arena pose.
 
 - **Input:** 7-D `(x, y, θ, v, ω, v_cmd, ω_cmd)`.
-- **Output:** body increment from the current pose.
+- **Output:** 5-D body increment, rigid-body integrated from the current state.
 - **Measures:** a geometry-free baseline.
 
 ### `QuotientUnicycleNet` (`quotient`)
@@ -39,7 +39,7 @@ Sees the arena pose.
 Drops translation and heading.
 
 - **Input:** 4-D `(v, ω, v_cmd, ω_cmd)`.
-- **Output:** body increment.
+- **Output:** 5-D body increment.
 - **Measures:** SE(2) quotient only.
 
 ### `QuotientUnicycleNet` + data augmentation (`quotient_aug`)
@@ -53,16 +53,16 @@ Same net as `quotient`. Training prefixes are concatenated with their left–rig
 Quotient leftover, Reynolds-averaged over the two Z₂ elements (identity and left–right). Wheels swap; polar / axial signs on the leftover; v stays.
 
 - **Input:** 4-D quotient; `Orbit` runs both group elements.
-- **Output:** averaged body increment.
+- **Output:** averaged 5-D body increment.
 - **Measures:** hard morphological symmetry vs data-aug.
 
 | family | class | prior | input | output |
 | --- | --- | --- | --- | --- |
 | (loaded) | `PhysicsUnicycle` | analytic unicycle | pose + command | next pose |
-| `naive` | `NaiveUnicycle` | none | world 7-D | body 3-D |
-| `quotient` | `QuotientUnicycleNet` | SE(2) quotient | 4-D rates+cmd | body 3-D |
-| `quotient_aug` | same as quotient | quotient + mirrored train | 4-D | body 3-D |
-| `quotient_sym` | `QuotientSymUnicycleNet` | quotient + Z₂ | 4-D, orbit | body 3-D |
+| `naive` | `NaiveUnicycle` | none | world 7-D | body 5-D |
+| `quotient` | `QuotientUnicycleNet` | SE(2) quotient | 4-D rates+cmd | body 5-D |
+| `quotient_aug` | same as quotient | quotient + mirrored train | 4-D | body 5-D |
+| `quotient_sym` | `QuotientSymUnicycleNet` | quotient + Z₂ | 4-D, orbit | body 5-D |
 
 ```bash
 python -m unicycle.experiments.train.naive --seed 0

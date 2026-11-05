@@ -6,6 +6,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 from matplotlib.animation import FuncAnimation, PillowWriter
 
 from unicycle.experiments.data import Trajectory, commanded_vw, turn_counts
@@ -97,6 +98,45 @@ def write_gif(log: Trajectory, dest: Path, split: str, max_frames: int = 180) ->
     path = dest / f"{split}_{_slug(log.name)}.gif"
     anim.save(path, writer=PillowWriter(fps=20))
     plt.close(fig)
+    return path
+
+
+def _device(model) -> torch.device:
+    for tensor in model.parameters():
+        return tensor.device
+    for tensor in model.buffers():
+        return tensor.device
+    return torch.device("cpu")
+
+
+@torch.no_grad()
+def plot_test_rollouts(model, logs: list[Trajectory], family: str, dest: Path | None = None) -> Path:
+    """Full-collection open-loop XY vs ground truth on every test log."""
+    dest = ensure_viz(dest) / "rollouts"
+    dest.mkdir(parents=True, exist_ok=True)
+    device = _device(model)
+    model.eval()
+    fig, axes = plt.subplots(1, len(logs), figsize=(4.4 * max(len(logs), 1), 4.4))
+    if len(logs) == 1:
+        axes = [axes]
+    for ax, log in zip(axes, logs):
+        pose = torch.tensor(log.poses[0], dtype=torch.float32, device=device).unsqueeze(0)
+        rates = torch.tensor(log.rates[0], dtype=torch.float32, device=device).unsqueeze(0)
+        command = torch.tensor(log.commands, dtype=torch.float32, device=device).unsqueeze(0)
+        pred = model.rollout(pose, rates, command, log.dt).squeeze(0).cpu().numpy()
+        gt = log.poses
+        ax.plot(gt[:, 0], gt[:, 1], color="#9aa4b2", lw=2.0, label="ground truth")
+        ax.plot(pred[:, 0], pred[:, 1], color="#c0392b", lw=1.4, ls="--", label="rollout")
+        ax.scatter(gt[0, 0], gt[0, 1], c="k", s=18, zorder=3)
+        ax.set_aspect("equal")
+        ax.set_title(log.name)
+        ax.set_xlabel("x (m)")
+        ax.set_ylabel("y (m)")
+    axes[0].legend(loc="best", frameon=False, fontsize=9)
+    fig.suptitle(f"{family} · full test rollouts", fontsize=14, color="#1a365d")
+    fig.tight_layout()
+    path = dest / f"{family}_test.png"
+    fig.savefig(path, dpi=140)
     return path
 
 

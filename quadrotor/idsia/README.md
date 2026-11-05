@@ -1,14 +1,14 @@
 # IDSIA Crazyflie sys-id
 
-Busetto et al., *Control Engineering Practice* 172 (2026). Official split: Square / Random / Chirp runs 1–3 train, run 4 val, Melon test. Fetch with `python quadrotor/fetch_idsia.py`. Shared kinematics are `quadrotor.geometry`.
+Busetto et al., *Control Engineering Practice* 172 (2026). Official split: Square / Random / Chirp runs 1–3 train, run 4 val, Melon test. Fetch with `python -m quadrotor.idsia.fetch`. Shared kinematics are `quadrotor.geometry`.
 
-We train three models with **their recipe** (stride 1, 50-step windows, WeightedMSE λ=0.1, Adam 1e-5→1e-8 cosine T=500, 20 epochs, best val):
+We train three models with **their recipe** (constants in `idsia_training_reproduction_params.py`: stride 1, 50-step windows, WeightedMSE λ=0.1, Adam 1e-5→1e-8 cosine T=500, 20 epochs, best val):
 
 | family | class | what it is |
 | --- | --- | --- |
-| `quad_dynamics` | `QuadDynamicsNet` | delay-line MLP on the 13-D quotient → body (a, α); kinematics `_apply`. Optional Z₂×Z₂ (default on). History length 10 is internal. |
-| `phys_quotient` | `PhysQuotient` | frozen Crazyflie RK4 + 12-D residual on the quotient only |
-| `phys_quotient_sym` | `PhysQuotientSym` | same physics, body residual with Reynolds orbit |
+| `quad_dynamics` | `QuadDynamicsNet` | frozen Crazyflie RK4 + body 12-D residual on world 16-D `(log R, p, v, ω, Ω)` |
+| `phys_quotient` | `PhysQuotient` | same physics + residual on the 13-D quotient (no orbit) |
+| `phys_quotient_sym` | `PhysQuotientSym` | same physics + residual, Reynolds-averaged over Z₂×Z₂ |
 
 Their published physics and phys+res checkpoints are loaded as-is (`test_baselines.py`). Do not retrain them.
 

@@ -1,5 +1,4 @@
-"""Crazyflie dynamics with body-frame canonicalization and airframe symmetry.
+"""Shared quadrotor geometry, flight logs, and residual wrappers.
 
-Shared math: ``canonical.PreparedFlight`` and ``geometry`` (SO(3) + kinematics).
-The Crazyflie benchmark is ``quadrotor/idsia``.
+Benchmark code lives in ``quadrotor.idsia``.
 """

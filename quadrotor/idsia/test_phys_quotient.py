@@ -1,5 +1,5 @@
 from quadrotor.idsia.cli import test_main
-from quadrotor.idsia.recipe import PHYS_QUOTIENT
+from quadrotor.idsia.idsia_training_reproduction_params import PHYS_QUOTIENT
 
 if __name__ == "__main__":
     test_main(PHYS_QUOTIENT)

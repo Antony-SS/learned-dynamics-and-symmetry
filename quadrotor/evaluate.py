@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from quadrotor.canonical import HORIZON_STEPS, PreparedFlight
+from quadrotor.flight import PreparedFlight
 from quadrotor.geometry import _integrate, _so3_log, module_device
 
 
@@ -13,7 +13,7 @@ def benchmark_mae(
     model: torch.nn.Module,
     flights: list[PreparedFlight],
     *,
-    horizon: int = HORIZON_STEPS,
+    horizon: int,
     batch_size: int = 256,
     start_stride: int = 1,
     start_offset: int = 0,

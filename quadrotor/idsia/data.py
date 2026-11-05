@@ -7,12 +7,33 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quadrotor.canonical import PreparedFlight
-from quadrotor.geometry import quat_to_matrix
+from quadrotor.flight import PreparedFlight
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = Path(__file__).resolve().parent / "nanodrone-sysid-benchmark"
 TRAIN_TRAJECTORIES = ("square", "random", "chirp")
+
+def _quat_xyzw_to_matrix(quat_xyzw: np.ndarray) -> np.ndarray:
+    """IDSIA CSVs store scalar-last quaternions; we keep rotations as SO(3)."""
+    quat = np.asarray(quat_xyzw, dtype=float)
+    norm = np.linalg.norm(quat, axis=1, keepdims=True)
+    quat = quat / np.clip(norm, 1e-12, None)
+    x, y, z, w = quat.T
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    matrix = np.empty((len(quat), 3, 3), dtype=float)
+    matrix[:, 0, 0] = 1.0 - 2.0 * (yy + zz)
+    matrix[:, 0, 1] = 2.0 * (xy - wz)
+    matrix[:, 0, 2] = 2.0 * (xz + wy)
+    matrix[:, 1, 0] = 2.0 * (xy + wz)
+    matrix[:, 1, 1] = 1.0 - 2.0 * (xx + zz)
+    matrix[:, 1, 2] = 2.0 * (yz - wx)
+    matrix[:, 2, 0] = 2.0 * (xz - wy)
+    matrix[:, 2, 1] = 2.0 * (yz + wx)
+    matrix[:, 2, 2] = 1.0 - 2.0 * (xx + yy)
+    return matrix
+
 
 _COLUMNS = (
     "t",
@@ -36,7 +57,7 @@ def _load(path: Path) -> PreparedFlight:
     dt = np.diff(time).astype(np.float32)
     if np.any(dt <= 0):
         raise ValueError(f"{path} has non-positive time increments")
-    rotation = quat_to_matrix(values[:, 4:8]).astype(np.float32)
+    rotation = _quat_xyzw_to_matrix(values[:, 4:8]).astype(np.float32)
     return PreparedFlight(
         name=path.stem,
         position=values[:, 1:4],

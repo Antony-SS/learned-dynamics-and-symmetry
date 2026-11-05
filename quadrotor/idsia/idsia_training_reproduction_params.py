@@ -10,9 +10,7 @@ from pathlib import Path
 
 import torch
 
-from quadrotor.canonical import HORIZON_STEPS
-
-HORIZON = HORIZON_STEPS
+HORIZON = 50
 STRIDE = 1
 EPOCHS = 20
 BATCH = 256

@@ -7,7 +7,7 @@ import argparse
 from quadrotor.geometry import train_device
 from quadrotor.idsia.data import load_idsia_prepared
 from quadrotor.idsia.evaluate import eval_model, family_summary
-from quadrotor.idsia.recipe import KEYS
+from quadrotor.idsia.idsia_training_reproduction_params import KEYS
 from quadrotor.idsia.train_lib import list_seeds, load_trained, train_family
 
 
@@ -22,7 +22,7 @@ def train_main(family: str) -> None:
     parser = argparse.ArgumentParser(description=f"Train {family} with the IDSIA recipe")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--no-symmetric", action="store_true", help="QuadDynamicsNet without Z2×Z2")
+    parser.add_argument("--no-symmetric", action="store_true", help="disable Z2×Z2 on phys_quotient_sym")
     args = parser.parse_args()
     device = train_device(args.device)
     train_family(family, args.seed, device=device, symmetric=not args.no_symmetric)

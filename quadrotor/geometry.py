@@ -44,28 +44,6 @@ def so3_log_batch(rotations: np.ndarray) -> np.ndarray:
     return scale[:, None] * vee
 
 
-def quat_to_matrix(quat_xyzw: np.ndarray) -> np.ndarray:
-    """Scalar-last quaternions ``(N, 4)`` to rotation matrices ``(N, 3, 3)``."""
-    quat = np.asarray(quat_xyzw, dtype=float)
-    norm = np.linalg.norm(quat, axis=1, keepdims=True)
-    quat = quat / np.clip(norm, 1e-12, None)
-    x, y, z, w = quat.T
-    xx, yy, zz = x * x, y * y, z * z
-    xy, xz, yz = x * y, x * z, y * z
-    wx, wy, wz = w * x, w * y, w * z
-    matrix = np.empty((len(quat), 3, 3), dtype=float)
-    matrix[:, 0, 0] = 1.0 - 2.0 * (yy + zz)
-    matrix[:, 0, 1] = 2.0 * (xy - wz)
-    matrix[:, 0, 2] = 2.0 * (xz + wy)
-    matrix[:, 1, 0] = 2.0 * (xy + wz)
-    matrix[:, 1, 1] = 1.0 - 2.0 * (xx + zz)
-    matrix[:, 1, 2] = 2.0 * (yz - wx)
-    matrix[:, 2, 0] = 2.0 * (xz - wy)
-    matrix[:, 2, 1] = 2.0 * (yz + wx)
-    matrix[:, 2, 2] = 1.0 - 2.0 * (xx + yy)
-    return matrix
-
-
 def project_rotation(rotation: np.ndarray) -> np.ndarray:
     """Nearest rotation matrix, so an integrated attitude stays in SO(3)."""
     u, _singular, vt = np.linalg.svd(rotation)

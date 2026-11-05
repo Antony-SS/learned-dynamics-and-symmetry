@@ -17,7 +17,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from quadrotor.canonical import HORIZON_STEPS, PreparedFlight
+from quadrotor.flight import PreparedFlight
+from quadrotor.idsia.idsia_training_reproduction_params import HORIZON
 from quadrotor.geometry import so3_log_batch
 from quadrotor.idsia.data import DEFAULT_ROOT
 from quadrotor.geometry import _so3_exp, _so3_log
@@ -420,6 +421,33 @@ def fit_scalers(
     )
 
 
+def fit_world_scalers(
+    flights: list[PreparedFlight],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Mean / std of 16-D world features ``(log R, p, v, ω, Ω)``."""
+    rows = []
+    for flight in flights:
+        so3 = so3_log_batch(flight.rotation[:-1]).astype(np.float32)
+        rows.append(
+            np.concatenate(
+                [
+                    so3,
+                    flight.position[:-1],
+                    flight.velocity_world[:-1],
+                    flight.omega_body[:-1],
+                    flight.motors,
+                ],
+                axis=1,
+            )
+        )
+    values = np.concatenate(rows, axis=0)
+    scale = np.clip(np.std(values, axis=0).astype(np.float32), 1e-6, None)
+    return (
+        torch.as_tensor(np.mean(values, axis=0), dtype=torch.float32),
+        torch.as_tensor(scale, dtype=torch.float32),
+    )
+
+
 def fit_canonical_scalers(
     flights: list[PreparedFlight],
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -474,7 +502,7 @@ def train_phys_res(
     val_flights: list[PreparedFlight],
     *,
     epochs: int = 20,
-    horizon: int = HORIZON_STEPS,
+    horizon: int = HORIZON,
     stride: int | None = None,
     batch_size: int = 256,
     device: str | torch.device = "cpu",

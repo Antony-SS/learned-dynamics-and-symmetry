@@ -12,7 +12,7 @@ import numpy as np
 import torch
 
 from unicycle.experiments.data import load_all, load_split
-from unicycle.experiments.models import PHYSICS, TRAIN_FAMILIES, make_model
+from unicycle.experiments.models import PHYSICS, TRAIN_FAMILIES, load_state, make_model
 from unicycle.experiments.train.lib import _configure
 from unicycle.experiments.utils.params import RUNS, VIZ
 
@@ -52,8 +52,7 @@ def _load_model(path: str, family: str):
     train, _val, _test = load_split(augment_train=family == "quotient_aug")
     model = _configure(family, train, torch.device("cpu"))
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    state = payload["state"] if isinstance(payload, dict) and "state" in payload else payload
-    model.load_state_dict(state, strict=False)
+    load_state(model, payload)
     model.eval()
     return model
 

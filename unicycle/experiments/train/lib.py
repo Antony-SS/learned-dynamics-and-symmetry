@@ -10,7 +10,7 @@ import torch
 
 from quadrotor.geometry import train_device
 from unicycle.experiments.data import Trajectory, load_split
-from unicycle.experiments.models import QUOTIENT_AUG, make_model
+from unicycle.experiments.models import QUOTIENT_AUG, load_state, make_model
 from unicycle.experiments.utils.params import (
     BATCH,
     EPOCHS,
@@ -134,7 +134,7 @@ def train_family(
     stale = 0
     if last_path.is_file():
         payload = torch.load(last_path, map_location="cpu", weights_only=False)
-        model.load_state_dict(payload["state"], strict=False)
+        load_state(model, payload)
         opt.load_state_dict(payload["optimizer"])
         curve = list(payload.get("curve", []))
         best_val = float(payload.get("best_val", float("inf")))
@@ -203,7 +203,7 @@ def train_family(
             break
 
     payload = torch.load(best_path, map_location="cpu", weights_only=False)
-    model.load_state_dict(payload["state"], strict=False)
+    load_state(model, payload)
     model.eval()
     return model
 
@@ -216,7 +216,7 @@ def load_trained(family: str, seed: int, device: torch.device | None = None) -> 
     payload = torch.load(path, map_location="cpu", weights_only=False)
     train, _val, _test = load_split(augment_train=family == QUOTIENT_AUG)
     model = _configure(family, train, device)
-    model.load_state_dict(payload["state"], strict=False)
+    load_state(model, payload)
     model.to(device)
     model.eval()
     return model

@@ -45,13 +45,19 @@ def eval_model(model, flights, family: str, seed: int) -> dict[str, list[float]]
 
 
 def family_summary(family: str) -> dict:
+    """Mean / std over seeds that still have a checkpoint.
+
+    Eval folders can outlive their checkpoints (for example after a run folder
+    is moved aside and retrained), so stale ``mae.json`` files are skipped.
+    """
+    from quadrotor.idsia.train.lib import list_seeds
+
     root = EVAL / family
     rows = []
-    if root.is_dir():
-        for child in sorted(root.glob("seed_*")):
-            path = child / "mae.json"
-            if path.is_file():
-                rows.append(json.loads(path.read_text()))
+    for seed in list_seeds(family):
+        path = root / f"seed_{seed}" / "mae.json"
+        if path.is_file():
+            rows.append(json.loads(path.read_text()))
     summary: dict = {"family": family, "seeds": rows}
     if rows:
         for key in KEYS:

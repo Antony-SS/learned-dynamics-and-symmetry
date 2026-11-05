@@ -1,6 +1,6 @@
 """Quotient features, the Z₂×Z₂ mirror average, and the body-increment lift.
 
-This module is the reusable layer. It wraps *any* MLP ``ℝ¹³ → ℝ¹²`` so that
+This module wraps *any* MLP ``ℝ¹³ → ℝ¹²`` so that
 the resulting dynamics model is
 
 * **invariant** to horizontal translation and yaw, because the MLP only sees the

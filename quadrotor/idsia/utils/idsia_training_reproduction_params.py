@@ -39,12 +39,16 @@ def run_dir(family: str, seed: int) -> Path:
             return folder
     return _REPO_RUNS / family / f"seed_{int(seed)}"
 
+# Loaded baselines, never trained here: analytic physics and the authors'
+# released physics+residual checkpoint (``baselines.load_phys_res``).
+PHYSICS = "physics"
 PHYS_RES = "phys_res"
+BASELINES = (PHYSICS, PHYS_RES)
 SYM_QUAD_DYNAMICS = "sym_quad_dynamics"
 PHYS_QUOTIENT = "phys_quotient"
 PHYS_QUOTIENT_SYM = "phys_quotient_sym"
 TRAIN_FAMILIES = (PHYS_QUOTIENT, PHYS_QUOTIENT_SYM, SYM_QUAD_DYNAMICS)
-FAMILIES = (PHYS_RES,) + TRAIN_FAMILIES
+FAMILIES = BASELINES + TRAIN_FAMILIES
 
 
 def eval_dir(family: str, seed: int) -> Path:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from quadrotor.geometry import _so3_exp
 from quadrotor.idsia.baselines.published import BaseQuadModel, PhysQuadModel
 from quadrotor.symmetry import Orbit, Quotient, apply_body_dx, quotient, symmetrize_feature_stats
 
@@ -60,8 +61,8 @@ class BodyLeftover(BaseQuadModel):
             self.feat_mean.copy_(mean.reshape_as(self.feat_mean).to(self.feat_mean))
             self.feat_scale.copy_(scale.reshape_as(self.feat_scale).to(self.feat_scale).clamp_min(1e-6))
 
-    def body_dx(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
-        feat = (self.feature_map(x, u) - self.feat_mean) / self.feat_scale
+    def body_dx(self, x: torch.Tensor, u: torch.Tensor, rotation: torch.Tensor | None = None) -> torch.Tensor:
+        feat = (self.feature_map(x, u, rotation) - self.feat_mean) / self.feat_scale
         return self.neural(feat)
 
 
@@ -69,7 +70,8 @@ class NaiveBodyStep(BodyLeftover):
     """Integrate the body increment from the current state. No analytic physics."""
 
     def one_step(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
-        return apply_body_dx(x, x, self.body_dx(x, u))
+        rotation = _so3_exp(x[:, 6:9])  # once per step, shared by features and lift
+        return apply_body_dx(x, x, self.body_dx(x, u, rotation), rotation)
 
 
 class PhysicsResidual(BodyLeftover):
@@ -82,7 +84,8 @@ class PhysicsResidual(BodyLeftover):
     def one_step(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             x_phys = self.phys.one_step(x, u)
-        return apply_body_dx(x_phys, x, self.body_dx(x, u))
+        rotation = _so3_exp(x[:, 6:9])  # once per step, shared by features and lift
+        return apply_body_dx(x_phys, x, self.body_dx(x, u, rotation), rotation)
 
 
 class PhysQuotient(PhysicsResidual):

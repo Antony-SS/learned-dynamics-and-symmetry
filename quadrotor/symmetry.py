@@ -101,10 +101,16 @@ def world_features(
     return torch.cat((_so3_log(rotation), position, velocity_world, omega, motors), dim=-1)
 
 
-def features_from_state(x: torch.Tensor, u: torch.Tensor, kind: str) -> torch.Tensor:
-    """Features from a packed state ``x = (p, v, log R, ω)`` and rotor speeds ``u``."""
+def features_from_state(
+    x: torch.Tensor, u: torch.Tensor, kind: str, rotation: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Features from a packed state ``x = (p, v, log R, ω)`` and rotor speeds ``u``.
+
+    Pass ``rotation = Exp(log R)`` if you already have it, to skip recomputing it.
+    """
     pos, vel, so3, omega = x.split((3, 3, 3, 3), dim=-1)
-    rotation = _so3_exp(so3)
+    if rotation is None:
+        rotation = _so3_exp(so3)
     if kind == "world":
         return world_features(pos, rotation, vel, omega, u)
     if kind == "quotient":
@@ -177,7 +183,9 @@ def symmetrize_feature_stats(mean: torch.Tensor, scale: torch.Tensor) -> tuple[t
     return sym_mean, sym_scale
 
 
-def apply_body_dx(x_phys: torch.Tensor, x: torch.Tensor, dx_body: torch.Tensor) -> torch.Tensor:
+def apply_body_dx(
+    x_phys: torch.Tensor, x: torch.Tensor, dx_body: torch.Tensor, rotation: torch.Tensor | None = None
+) -> torch.Tensor:
     """Add a body increment to a base step and return the packed next state.
 
     ``x`` is the current state ``(p, v, log R, ω)``. ``x_phys`` is the base step:
@@ -189,13 +197,19 @@ def apply_body_dx(x_phys: torch.Tensor, x: torch.Tensor, dx_body: torch.Tensor) 
         v' = v_phys + R Δv
         R' = R_phys Exp(Δθ)
         ω' = ω_phys + Δω
+
+    ``rotation`` is the current ``R = Exp(log R)``. Pass it if you already
+    computed it for the features, to skip recomputing it.
     """
     delta_pos, delta_vel, delta_rot, delta_omega = dx_body.split((3, 3, 3, 3), dim=-1)
     pos_p, vel_p, so3_p, omega_p = x_phys.split((3, 3, 3, 3), dim=-1)
-    rotation = _so3_exp(x[:, 6:9])
+    if rotation is None:
+        rotation = _so3_exp(x[:, 6:9])
+    # With no physics model the base step is x itself, so R_phys = R.
+    rotation_phys = rotation if x_phys is x else _so3_exp(so3_p)
     pos_next = pos_p + torch.bmm(rotation, delta_pos.unsqueeze(-1)).squeeze(-1)
     vel_next = vel_p + torch.bmm(rotation, delta_vel.unsqueeze(-1)).squeeze(-1)
-    rotation_next = torch.bmm(_so3_exp(so3_p), _so3_exp(delta_rot))
+    rotation_next = torch.bmm(rotation_phys, _so3_exp(delta_rot))
     omega_next = omega_p + delta_omega
     return torch.cat((pos_next, vel_next, _so3_log(rotation_next), omega_next), dim=-1)
 
@@ -205,8 +219,8 @@ class Quotient(nn.Module):
 
     dim = QUOTIENT_DIM
 
-    def forward(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
-        return features_from_state(x, u, "quotient")
+    def forward(self, x: torch.Tensor, u: torch.Tensor, rotation: torch.Tensor | None = None) -> torch.Tensor:
+        return features_from_state(x, u, "quotient", rotation)
 
 
 class WorldFeatures(nn.Module):
@@ -214,8 +228,8 @@ class WorldFeatures(nn.Module):
 
     dim = 16
 
-    def forward(self, x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
-        return features_from_state(x, u, "world")
+    def forward(self, x: torch.Tensor, u: torch.Tensor, rotation: torch.Tensor | None = None) -> torch.Tensor:
+        return features_from_state(x, u, "world", rotation)
 
 
 class Orbit(nn.Module):

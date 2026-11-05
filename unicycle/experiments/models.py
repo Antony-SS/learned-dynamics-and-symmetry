@@ -18,6 +18,8 @@ from unicycle.symmetry import (
 
 HIDDEN = 32
 N_HIDDEN = 3
+# Old checkpoints wrote ``(Δx, Δy, Δθ, Δv, Δω)``; ``BodyMlp`` now writes four and ``pack_no_slip`` inserts Δy.
+_LEGACY_OUT_ROWS = (0, 2, 3, 4)
 
 NAIVE = "naive"
 QUOTIENT = "quotient"
@@ -111,6 +113,25 @@ class PhysicsUnicycle(nn.Module):
             pose, rates = self.step(pose, rates, commands[..., t, :], dt)
             preds.append(pose)
         return torch.stack(preds, dim=-2)
+
+
+def adapt_checkpoint_state(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Map 5-D MLP heads from older runs onto the current 4-D ``BodyMlp``."""
+    adapted = dict(state)
+    for key, tensor in state.items():
+        if not key.endswith(".out.weight") or tensor.shape[0] != 5:
+            continue
+        rows = tensor.new_tensor(_LEGACY_OUT_ROWS, dtype=torch.long)
+        adapted[key] = tensor.index_select(0, rows)
+        bias_key = key.replace(".weight", ".bias")
+        if bias_key in state and state[bias_key].shape[0] == 5:
+            adapted[bias_key] = state[bias_key].index_select(0, rows)
+    return adapted
+
+
+def load_state(model: nn.Module, payload: dict | dict[str, torch.Tensor]) -> None:
+    state = payload["state"] if isinstance(payload, dict) and "state" in payload else payload
+    model.load_state_dict(adapt_checkpoint_state(state), strict=False)
 
 
 def make_model(family: str) -> nn.Module:

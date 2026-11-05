@@ -2,6 +2,8 @@
 
 Reimplements Busetto et al. PhysQuadModel / ResidualQuadModel / PhysResQuadModel
 so we can load their published checkpoints and roll them with our integrator.
+We do not retrain these baselines: physics+residual is always the authors'
+released ``phys+res_random_square_chirp.pt``.
 
 Their published PhysQuadModel multiplies omega_dot by 0 (angular velocity is
 held at the window seed while thrust still integrates). Physics-only and the
@@ -18,7 +20,6 @@ import torch
 import torch.nn.functional as F
 
 from quadrotor.flight import PreparedFlight
-from quadrotor.idsia.utils.idsia_training_reproduction_params import HORIZON
 from quadrotor.geometry import so3_log_batch
 from quadrotor.idsia.data.load import DEFAULT_ROOT
 from quadrotor.geometry import _so3_exp, _so3_log
@@ -495,141 +496,3 @@ def _windows(
         torch.as_tensor(np.stack(us), dtype=torch.float32),
         torch.as_tensor(np.stack(ys), dtype=torch.float32),
     )
-
-
-def train_phys_res(
-    train_flights: list[PreparedFlight],
-    val_flights: list[PreparedFlight],
-    *,
-    epochs: int = 20,
-    horizon: int = HORIZON,
-    stride: int | None = None,
-    batch_size: int = 256,
-    device: str | torch.device = "cpu",
-) -> PhysResQuadModel:
-    """Train the residual head on frozen physics if their checkpoint is missing."""
-    x_mean, x_scale, u_mean, u_scale = fit_scalers(train_flights)
-    phys = PhysQuadModel(zero_omega_dot=True)
-    residual = ResidualQuadModel(hidden_dim=64, num_layers=5)
-    model = PhysResQuadModel(phys, residual)
-    with torch.no_grad():
-        model.x_mean.copy_(x_mean)
-        model.x_scale.copy_(x_scale)
-        model.u_mean.copy_(u_mean)
-        model.u_scale.copy_(u_scale)
-    model.to(device)
-    train_x, train_u, train_y = _windows(train_flights, horizon, stride=stride)
-    val_x, val_u, val_y = _windows(val_flights, horizon, stride=stride)
-
-    def _normalize(x, u, y):
-        return (
-            (x - x_mean) / x_scale,
-            (u - u_mean) / u_scale,
-            (y - x_mean) / x_scale,
-        )
-
-    train_x, train_u, train_y = _normalize(train_x, train_u, train_y)
-    val_x, val_u, val_y = _normalize(val_x, val_u, val_y)
-    optimizer = torch.optim.Adam(model.neural.parameters(), lr=1e-4)
-    best = None
-    best_loss = float("inf")
-    curve = []
-    for epoch in range(epochs):
-        model.train()
-        order = torch.randperm(len(train_x))
-        train_loss = 0.0
-        seen = 0
-        for start in range(0, len(order), batch_size):
-            index = order[start : start + batch_size]
-            pred = model(train_x[index].to(device), train_u[index].to(device))
-            loss = (pred - train_y[index].to(device)).pow(2).mean()
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            train_loss += float(loss.detach()) * len(index)
-            seen += len(index)
-        model.eval()
-        with torch.no_grad():
-            val_loss = 0.0
-            counted = 0
-            for start in range(0, len(val_x), batch_size):
-                stop = start + batch_size
-                pred = model(val_x[start:stop].to(device), val_u[start:stop].to(device))
-                val_loss += float((pred - val_y[start:stop].to(device)).pow(2).mean()) * (stop - start)
-                counted += stop - start
-        val_loss /= max(counted, 1)
-        train_mean = train_loss / max(seen, 1)
-        curve.append({"epoch": epoch + 1, "train": train_mean, "val": val_loss})
-        print(
-            f"phys+res  epoch {epoch + 1}/{epochs}  "
-            f"train {train_mean:.6f}  val {val_loss:.6f}",
-            flush=True,
-        )
-        if val_loss < best_loss:
-            best_loss = val_loss
-            best = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
-    if best is not None:
-        model.load_state_dict(best)
-    model.train_curve = curve
-    model.eval()
-    return model
-
-
-def load_or_train_idsia_baselines(
-    train_flights: list[PreparedFlight] | None = None,
-    val_flights: list[PreparedFlight] | None = None,
-    *,
-    root: Path | None = None,
-    device: str | torch.device = "cpu",
-    train_if_missing: bool = True,
-    epochs: int = 20,
-) -> dict[str, torch.nn.Module]:
-    """Physics (analytic) plus their residual / physics+residual checkpoints."""
-    loaded: dict[str, torch.nn.Module] = {"physics": load_physics(device)}
-    try:
-        loaded["phys+res"] = load_phys_res(root, device)
-        print(f"loaded IDSIA physics+residual from {_checkpoint_dir(root) / PHYS_RES_NAME}")
-    except FileNotFoundError:
-        if not train_if_missing or train_flights is None or val_flights is None:
-            raise
-        print("IDSIA physics+residual checkpoint missing; training the residual head")
-        loaded["phys+res"] = train_phys_res(
-            train_flights, val_flights, epochs=epochs, device=device
-        )
-    try:
-        loaded["residual"] = load_residual(root, device, train_flights)
-        print(f"loaded IDSIA residual MLP from {_checkpoint_dir(root) / RESIDUAL_NAME}")
-    except FileNotFoundError:
-        print("IDSIA residual MLP checkpoint missing; skipping residual-only baseline")
-    for model in loaded.values():
-        model.to(device)
-        model.eval()
-    return loaded
-
-
-def load_theirs(
-    train_flights: list[PreparedFlight] | None = None,
-    val_flights: list[PreparedFlight] | None = None,
-    *,
-    root: Path | None = None,
-    device: str | torch.device = "cpu",
-    train_if_missing: bool = True,
-) -> dict[str, torch.nn.Module]:
-    """IDSIA physics and physics+residual only."""
-    loaded: dict[str, torch.nn.Module] = {"physics": load_physics(device)}
-    try:
-        loaded["phys+res"] = load_phys_res(root, device)
-        print(f"loaded IDSIA physics+residual from {_checkpoint_dir(root) / PHYS_RES_NAME}")
-    except FileNotFoundError:
-        if not train_if_missing or train_flights is None or val_flights is None:
-            raise
-        print("IDSIA physics+residual checkpoint missing; training the residual head")
-        loaded["phys+res"] = train_phys_res(
-            train_flights, val_flights, device=device
-        )
-    for model in loaded.values():
-        model.to(device)
-        model.eval()
-    return loaded
-
-

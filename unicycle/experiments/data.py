@@ -173,7 +173,7 @@ def load_split(
 ) -> tuple[list[Trajectory], list[Trajectory], list[Trajectory]]:
     """First 75% of each train collection, last 25% val, three full test logs.
 
-    Checkpoints are chosen on the validation quarter (5 s xyyaw). Test is
+    Checkpoints are chosen on the validation quarter (``HORIZON_S`` xyyaw). Test is
     figure 8, diagonal lawnmower, and slalom. ``augment_train`` appends the
     left–right mirror of every training prefix.
     """

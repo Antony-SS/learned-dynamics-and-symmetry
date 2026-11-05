@@ -2,7 +2,7 @@
 
 Busetto et al., *Control Engineering Practice* 172 (2026). Official split: Square / Random / Chirp runs 1–3 train, run 4 val, Melon test. Fetch with `python -m quadrotor.idsia.data.fetch`. Shared kinematics are `quadrotor.geometry`.
 
-Layout: `data/` (clone + CSV loader), `baselines/` (published physics / phys+res), `train/` (our leftover families), `eval/` (Melon MAE), `utils/` (their training constants + CLI).
+Layout: `data/` (clone + CSV loader), `baselines/` (published physics and phys+res, loaded, never trained), `train/` (our leftover families), `eval/` (Melon MAE), `utils/` (their training constants + CLI).
 
 We train with **their recipe** (`utils/idsia_training_reproduction_params.py`: stride 1, 50-step windows, WeightedMSE λ=0.1, Adam 1e-5→1e-8 cosine T=500, 20 epochs, best val).
 
@@ -10,7 +10,7 @@ Every leftover we train writes the same **body** 12-D increment `(Δp, Δv, Δθ
 
 ## Ours vs. Theirs
 
-Melon MAE at h = 1 / 10 / 50 on position, rotation, velocity and ω. Analytic physics is the only baseline we load as published. We retrain their phys+res architecture ourselves (`runs/quadrotor/phys_res/`, 5 seeds), because the official checkpoint was undertrained. We then keep their analytic RK4 and change only the leftover (quotient, then quotient + Z₂×Z₂). `SymmetryQuadDynamicsNet` is a separate test: it drops their vehicle model and relies on symmetry alone.
+Melon MAE at h = 1 / 10 / 50 on position, rotation, velocity and ω. Both baselines are loaded as published: analytic physics, and the authors' released physics+residual checkpoint. We do not retrain their models. We then keep their analytic RK4 and change only the leftover (quotient, then quotient + Z₂×Z₂). `SymmetryQuadDynamicsNet` is a separate test: it drops their vehicle model and relies on symmetry alone.
 
 ### Their baselines
 
@@ -28,11 +28,11 @@ Analytic Crazyflie rigid body, RK4, `dt = 0.01`. Motors (rad/s) map to thrust an
 
 #### Physics + residual (their leftover)
 
-A frozen copy of the physics above, plus an MLP on the **normalized world** chart. We reproduced their published numbers and did slightly better, because their checkpoint was slightly undertrained.
+A frozen copy of the physics above, plus an MLP on the **normalized world** chart. We load the authors' released checkpoint, `nanodrone-sysid-benchmark/out/models/phys+res_random_square_chirp.pt` (`baselines.load_phys_res`), and reproduce their reported Melon numbers exactly. It was saved at epoch 19 of a 500-epoch cosine schedule.
 
 - **Input:** normalized `(p, v, Log R, ω)` and normalized `Ω` (16-D concat). Each channel is standardized with training-set statistics.
 - **Output:** `x_phys + Δx` in the same normalized world chart, then denormalized.
-- **Measures:** their leftover, trained with their recipe (5 seeds). The table uses our reproductions in `runs/quadrotor/phys_res/`, which do slightly better than their published `phys+res_random_square_chirp.pt`.
+- **Measures:** their leftover, exactly as published.
 
 ### Our trained models
 
@@ -71,8 +71,8 @@ No Crazyflie force or torque model. The network predicts the whole step, and we 
 
 | family              | class                     | prior                | input                  | output                       |
 | ------------------- | ------------------------- | -------------------- | ---------------------- | ---------------------------- |
-| (loaded)            | `PhysQuadModel`           | analytic RK4         | world 12-D + `Ω`       | next world 12-D              |
-| `phys_res`          | `PhysResQuadModel`        | RK4 + world leftover | norm. world 12-D + `Ω` | world `x_phys + Δx`          |
+| `physics` (loaded)  | `PhysQuadModel`           | analytic RK4         | world 12-D + `Ω`       | next world 12-D              |
+| `phys_res` (loaded) | `PhysResQuadModel`        | RK4 + world leftover | norm. world 12-D + `Ω` | world `x_phys + Δx`          |
 | `phys_quotient`     | `PhysQuotient`            | RK4 + leftover       | quotient 13-D          | body 12-D after RK4          |
 | `phys_quotient_sym` | `PhysQuotientSym`         | RK4 + leftover       | quotient 13-D, orbit   | body 12-D after RK4          |
 | `sym_quad_dynamics` | `SymmetryQuadDynamicsNet` | rigid-body Exp only  | quotient 13-D, orbit   | body 12-D from current state |
@@ -86,6 +86,6 @@ python -m quadrotor.idsia.eval.baselines
 python -m quadrotor.idsia.visualizations.interactive
 ```
 
-`--all` evaluates every seed that already has a checkpoint. Checkpoints: `runs/quadrotor/<family>/seed_k/{best.pt,last.pt}` (also `idsia/out/runs/`). Melon MAE: `idsia/out/eval/<family>/seed_k/{mae.json,predictions.npz}`.
+`eval.baselines` scores physics and the published phys+res. `--all` evaluates every seed of a trained family that already has a checkpoint. Checkpoints: `runs/quadrotor/<family>/seed_k/{best.pt,last.pt}` (also `idsia/out/runs/`). Melon MAE: `idsia/out/eval/<family>/seed_k/{mae.json,predictions.npz}`.
 
 `train/train.ipynb` trains one seed (resumes `last.pt`). `eval/results.ipynb` prints the Melon table at h=1 / 10 / 50. `visualizations/interactive` is a local Melon page: two models, start scrubber, gif window, 0.5 s channel plots.

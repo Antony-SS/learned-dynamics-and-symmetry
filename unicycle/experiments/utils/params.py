@@ -7,13 +7,13 @@ from pathlib import Path
 from unicycle.experiments.data import MAX_LINEAR_VELOCITY
 from unicycle.experiments.models import NAIVE, PHYSICS, QUOTIENT, QUOTIENT_AUG, QUOTIENT_SYM
 
-HORIZON_S = 5.0
-TEST_HORIZONS_S = (1.0, 5.0, 30.0)
+HORIZON_S = 10.0
+TEST_HORIZONS_S = (1.0, 10.0, 30.0)
 HEADING_LENGTH = MAX_LINEAR_VELOCITY
-EPOCHS = 40
+EPOCHS = 60
 PATIENCE = 10
 BATCH = 256
-LR = 1e-4
+LR = 1e-3
 SEEDS = (0, 1, 2, 3, 4)
 
 RUNS = Path(__file__).resolve().parents[3] / "runs" / "unicycle"

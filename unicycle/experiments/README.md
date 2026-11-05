@@ -2,9 +2,9 @@
 
 Commanded `(v, ω)` dynamics on robot 11 `standard_collections`. Shared SE(2) maps live in `unicycle/`.
 
-Layout: `data.py` (split + mirrors), `models.py` (families), `train/` (5 s windows), `eval/` (test xyyaw), `utils/` (horizons + CLI), `visualizations/` (stills / gifs from the train notebook).
+Layout: `data.py` (split + mirrors), `models.py` (families), `train/` (open-loop windows), `eval/` (test xyyaw), `utils/` (horizons + CLI), `visualizations/` (stills / gifs from the train notebook).
 
-We train with **5 s** open-loop windows. The checkpoint is the lowest **5 s** xyyaw on the last **25%** of each training collection (same loss as train). That 25% is the val split. Test still reports 1 s / 5 s / 30 s / full.
+We train with **10 s** open-loop windows (`HORIZON_S` in `utils/params.py`). The checkpoint is the lowest **10 s** xyyaw on the last **25%** of each training collection (same loss as train). That 25% is the val split. Test still reports 1 s / 10 s / 30 s / full.
 
 State is `(x, y, yaw, v_body, ω_body)`. Commands are always commanded, never encoder-realized.
 
@@ -73,4 +73,4 @@ python -m unicycle.experiments.interactive
 
 `--all` evaluates every seed that already has a checkpoint. Checkpoints: `runs/unicycle/<family>/seed_k/{best.pt,last.pt}`. Test metrics: `runs/unicycle/eval/<family>/seed_k/test.json`.
 
-`train/train.ipynb` starts with left/right counts, a commanded (v, ω) heatmap, then stills and gifs of every collection. It trains one seed (resumes `last.pt`). `eval/results.ipynb` prints test position / heading RMSE at 1 s, 5 s, 30 s, and the full log. `python -m unicycle.experiments.interactive` opens a local page: pick a `.pt` under `runs/unicycle/`, pick a collection, scrub the start time, play / stop the open-loop.
+`train/train.ipynb` starts with left/right counts, a commanded (v, ω) heatmap, then stills and gifs of every collection. It trains one seed (resumes `last.pt`). `eval/results.ipynb` prints test position / heading RMSE at 1 s, 10 s, 30 s, and the full log. `python -m unicycle.experiments.interactive` opens a local page: pick a `.pt` under `runs/unicycle/`, pick a collection, scrub the start time, play / stop the open-loop.

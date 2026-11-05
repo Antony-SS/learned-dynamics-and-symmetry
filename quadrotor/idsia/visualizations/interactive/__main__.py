@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from quadrotor.geometry import _integrate
-from quadrotor.idsia.baselines import load_physics
+from quadrotor.idsia.baselines import load_phys_res, load_physics
 from quadrotor.idsia.data import load_idsia_prepared
 from quadrotor.idsia.train.lib import load_trained
 from quadrotor.idsia.utils.idsia_training_reproduction_params import PHYS_RES, TRAIN_FAMILIES, run_roots
@@ -27,10 +27,12 @@ AXIS_M = 0.12
 
 
 def list_models() -> list[dict]:
-    rows = [{"id": "physics", "label": "physics (analytic)"}]
-    families = (PHYS_RES,) + TRAIN_FAMILIES
+    rows = [
+        {"id": "physics", "label": "physics (analytic)"},
+        {"id": PHYS_RES, "label": "phys_res (published checkpoint)"},
+    ]
     for root in run_roots():
-        for family in families:
+        for family in TRAIN_FAMILIES:
             folder = root / family
             if not folder.is_dir():
                 continue
@@ -59,6 +61,8 @@ def _melon():
 
 @lru_cache(maxsize=16)
 def _load(model_id: str):
+    if model_id == PHYS_RES:
+        return load_phys_res(device="cpu")
     if model_id == "physics":
         model = load_physics("cpu")
         model.eval()

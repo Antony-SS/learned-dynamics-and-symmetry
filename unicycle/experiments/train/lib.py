@@ -1,4 +1,4 @@
-"""5 s window trainer. Best checkpoint is lowest 5 s val xyyaw."""
+"""Open-loop window trainer. Best checkpoint is lowest val xyyaw at ``HORIZON_S``."""
 
 from __future__ import annotations
 
@@ -144,7 +144,7 @@ def train_family(
     else:
         print(
             f"{family}  seed {seed}  params {n_params(model)}  "
-            f"windows {len(train_p)}  5 s train / 5 s val xyyaw",
+            f"windows {len(train_p)}  {HORIZON_S:g} s train / {HORIZON_S:g} s val xyyaw",
             flush=True,
         )
 

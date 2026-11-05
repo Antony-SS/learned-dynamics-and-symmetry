@@ -11,13 +11,12 @@ import torch
 from quadrotor.geometry import train_device
 from quadrotor.idsia.baselines.published import _windows, fit_canonical_scalers, fit_scalers
 from quadrotor.idsia.data.load import load_idsia_prepared
-from quadrotor.idsia.baselines.published import PhysQuadModel, PhysResQuadModel, ResidualQuadModel
 from quadrotor.idsia.train.models import make_model
 from quadrotor.idsia.utils.idsia_training_reproduction_params import (
     BATCH,
     EPOCHS,
     HORIZON,
-    PHYS_RES,
+    TRAIN_FAMILIES,
     LR_END,
     LR_START,
     SCHED_T,
@@ -168,18 +167,6 @@ def train_family(
     return model
 
 
-def _load_phys_res(seed: int, device: torch.device) -> torch.nn.Module:
-    path = run_dir(PHYS_RES, seed) / "best.pt"
-    if not path.is_file():
-        raise FileNotFoundError(path)
-    payload = torch.load(path, map_location="cpu", weights_only=False)
-    model = PhysResQuadModel(PhysQuadModel(zero_omega_dot=True), ResidualQuadModel(hidden_dim=64, num_layers=5))
-    model.load_state_dict(payload["state"], strict=False)
-    model.to(device)
-    model.eval()
-    return model
-
-
 def adapt_state(state: dict, model: torch.nn.Module) -> dict[str, torch.Tensor]:
     """Map older checkpoint names onto the current module tree.
 
@@ -209,8 +196,11 @@ def adapt_state(state: dict, model: torch.nn.Module) -> dict[str, torch.Tensor]:
 
 def load_trained(family: str, seed: int, device: torch.device | None = None, symmetric: bool = True) -> torch.nn.Module:
     device = train_device() if device is None else device
-    if family == PHYS_RES:
-        return _load_phys_res(seed, device)
+    if family not in TRAIN_FAMILIES:
+        raise ValueError(
+            f"{family!r} is not a trained family {TRAIN_FAMILIES}. "
+            "The physics+residual baseline is the published checkpoint: use baselines.load_phys_res()."
+        )
     path = run_dir(family, seed) / "best.pt"
     if not path.is_file():
         raise FileNotFoundError(path)

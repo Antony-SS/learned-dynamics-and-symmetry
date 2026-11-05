@@ -14,7 +14,7 @@ import torch
 from unicycle.experiments.data import load_all, load_split
 from unicycle.experiments.models import PHYSICS, TRAIN_FAMILIES, load_state, make_model
 from unicycle.experiments.train.lib import _configure
-from unicycle.experiments.utils.params import RUNS, VIZ
+from unicycle.experiments.utils.params import HORIZON_S, RUNS, VIZ
 
 PAGE = VIZ / "interactive" / "index.html"
 HOST = "127.0.0.1"
@@ -144,7 +144,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         log = logs[name]
         start = _index_at(log, float(body.get("start_s", 0.0)))
-        window_s = max(float(body.get("window_s", 5.0)), log.dt)
+        window_s = max(float(body.get("window_s", HORIZON_S)), log.dt)
         steps = min(max(int(round(window_s / log.dt)), 1), log.n_steps - start)
         traces = {
             "vicon": _xyyaw(log.poses[start : start + steps + 1]),

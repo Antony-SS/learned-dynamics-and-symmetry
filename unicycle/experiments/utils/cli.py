@@ -9,11 +9,16 @@ from unicycle.experiments.data import load_split
 from unicycle.experiments.eval.metrics import eval_model, family_summary, load_physics
 from unicycle.experiments.models import PHYSICS
 from unicycle.experiments.train.lib import list_seeds, load_trained, train_family
+from unicycle.experiments.utils.params import TEST_HORIZONS_S
+
+
+def _test_columns() -> str:
+    return "  ".join(f"{h:g}s" for h in TEST_HORIZONS_S) + "  full"
 
 
 def _fmt(row: dict) -> str:
     parts = []
-    for key in ("1s", "5s", "30s", "full"):
+    for key in [f"{h:g}s" for h in TEST_HORIZONS_S] + ["full"]:
         parts.append(f"{row[key]['position_rmse']:.4f}/{row[key]['heading_rmse']:.3f}")
     return "  ".join(parts)
 
@@ -36,7 +41,7 @@ def test_main(family: str) -> None:
     _train, _val, test = load_split()
     if family == PHYSICS:
         model = load_physics(device)
-        print(f"{'seed':6s}  pos/heading RMSE at 1s  5s  30s  full", flush=True)
+        print(f"{'seed':6s}  pos/heading RMSE at {_test_columns()}", flush=True)
         row = eval_model(model, test, family, 0, device=device)
         print(f"{'phys':<6s}  {_fmt(row)}", flush=True)
         return
@@ -45,7 +50,7 @@ def test_main(family: str) -> None:
         seeds = [args.seed]
     if not seeds:
         raise SystemExit(f"no checkpoints under runs/unicycle/{family}/")
-    print(f"{'seed':6s}  pos/heading RMSE at 1s  5s  30s  full", flush=True)
+    print(f"{'seed':6s}  pos/heading RMSE at {_test_columns()}", flush=True)
     for seed in seeds:
         model = load_trained(family, seed, device=device)
         row = eval_model(model, test, family, seed, device=device)

@@ -1,4 +1,4 @@
-"""Test-set xyyaw error at 1 s, 5 s, 30 s, and the full collection."""
+"""Test-set xyyaw error at ``TEST_HORIZONS_S`` and the full collection."""
 
 from __future__ import annotations
 

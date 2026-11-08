@@ -12,10 +12,10 @@ TEST_HORIZONS_S = (1.0, 10.0, 30.0)
 ROLLOUT_VIZ_WINDOW_S = 30.0
 ROLLOUT_VIZ_STARTS_S = (0.0, 30.0, 60.0)
 HEADING_LENGTH = MAX_LINEAR_VELOCITY
-EPOCHS = 60
-PATIENCE = 10
+EPOCHS = 40
 BATCH = 256
-LR = 1e-3
+LR = 1e-3  # cosine-annealed to LR_MIN over EPOCHS
+LR_MIN = 1e-5
 SEEDS = (0, 1, 2, 3, 4)
 
 RUNS = Path(__file__).resolve().parents[3] / "runs" / "unicycle"

@@ -17,8 +17,6 @@ from unicycle.symmetry import (
 
 HIDDEN = 32
 N_HIDDEN = 3
-# Legacy 4-D heads wrote ``(Δx, Δθ, Δv, Δω)``; current ``BodyMlp`` is five with Δy at index 1.
-_LEGACY_OUT_ROWS = (0, 2, 3, 4)
 
 NAIVE = "naive"
 QUOTIENT = "quotient"
@@ -30,7 +28,7 @@ FAMILIES = (PHYSICS,) + TRAIN_FAMILIES
 
 
 class BodyMlp(nn.Module):
-    """Geometry-free MLP. Writes packed ``(Δx, Δy, Δθ, Δv, Δω)``."""
+    """Geometry-free MLP. Writes ``(Δx, Δy, Δθ, Δv, Δω)``."""
 
     def __init__(self, in_dim: int, hidden: int = HIDDEN, n_hidden: int = N_HIDDEN) -> None:
         super().__init__()
@@ -66,6 +64,7 @@ class BodyStep(nn.Module):
             self.feat_scale.copy_(scale.reshape_as(self.feat_scale).to(self.feat_scale).clamp_min(1e-6))
 
     def body_dx(self, pose: torch.Tensor, rates: torch.Tensor, command: torch.Tensor) -> torch.Tensor:
+        """Body increment ``(Δx, Δy, Δθ, Δv, Δω)``, sideslip included."""
         feat = (self.feature_map(pose, rates, command) - self.feat_mean) / self.feat_scale
         return self.neural(feat)
 
@@ -114,74 +113,9 @@ class PhysicsUnicycle(nn.Module):
         return torch.stack(preds, dim=-2)
 
 
-def _remap_out_head(
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    *,
-    out_features: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """Align ``BodyMlp`` output layers between legacy 4-D and current 5-D checkpoints."""
-    in_features = weight.shape[1]
-    ckpt_out = weight.shape[0]
-    if ckpt_out == out_features:
-        return weight, bias
-    if ckpt_out == 5 and out_features == 4:
-        rows = weight.new_tensor(_LEGACY_OUT_ROWS, dtype=torch.long)
-        new_bias = None if bias is None else bias.index_select(0, rows)
-        return weight.index_select(0, rows), new_bias
-    if ckpt_out == 4 and out_features == 5:
-        new_w = weight.new_zeros(5, in_features)
-        new_w[0] = weight[0]
-        new_w[2] = weight[1]
-        new_w[3] = weight[2]
-        new_w[4] = weight[3]
-        new_b = None
-        if bias is not None:
-            new_b = bias.new_zeros(5)
-            new_b[0] = bias[0]
-            new_b[2] = bias[1]
-            new_b[3] = bias[2]
-            new_b[4] = bias[3]
-        return new_w, new_b
-    raise ValueError(f"cannot remap MLP out head {ckpt_out} → {out_features}")
-
-
-def adapt_checkpoint_state(
-    state: dict[str, torch.Tensor],
-    model: nn.Module,
-) -> dict[str, torch.Tensor]:
-    """Remap ``BodyMlp`` output layers when checkpoint and model head sizes differ."""
-    targets = model.state_dict()
-    adapted = dict(state)
-    for key, weight in state.items():
-        if not key.endswith(".out.weight"):
-            continue
-        target = targets.get(key)
-        if target is None or weight.shape == target.shape:
-            continue
-        bias_key = key.replace(".weight", ".bias")
-        ckpt_bias = state.get(bias_key)
-        new_w, new_b = _remap_out_head(
-            weight,
-            ckpt_bias,
-            out_features=int(target.shape[0]),
-        )
-        adapted[key] = new_w
-        if new_b is not None and bias_key in targets:
-            adapted[bias_key] = new_b
-    return adapted
-
-
-def load_state(model: nn.Module, payload: dict | dict[str, torch.Tensor]) -> None:
-    state = payload["state"] if isinstance(payload, dict) and "state" in payload else payload
-    adapted = adapt_checkpoint_state(state, model)
-    targets = model.state_dict()
-    compatible = {
-        key: tensor
-        for key, tensor in adapted.items()
-        if key in targets and tensor.shape == targets[key].shape
-    }
-    model.load_state_dict(compatible, strict=False)
+def load_state(model: nn.Module, payload: dict) -> None:
+    """Load a checkpoint payload ``{"state": ...}``. Strict: any mismatch raises."""
+    model.load_state_dict(payload["state"])
 
 
 def make_model(family: str) -> nn.Module:

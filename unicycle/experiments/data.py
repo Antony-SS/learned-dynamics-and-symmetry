@@ -27,13 +27,16 @@ TRAIN_LOGS = (
     "figure8_vertical",
     "lawnmower_horizontal",
     "lawnmower_vertical",
-    "random_trajectory",
+    "random_crawl",
+    "rounded_rects",
+    "rounded_rects_cw",
     "spiral",
     "spiral_cw",
 )
 TEST_LOGS = (
     "figure8",
     "lawnmower_diagonal",
+    "random_trajectory",
     "slalom",
 )
 
@@ -171,10 +174,10 @@ def load_split(
     *,
     augment_train: bool = False,
 ) -> tuple[list[Trajectory], list[Trajectory], list[Trajectory]]:
-    """First 75% of each train collection, last 25% val, three full test logs.
+    """First 75% of each train collection, last 25% val, four full test logs.
 
     Checkpoints are chosen on the validation quarter (``HORIZON_S`` xyyaw). Test is
-    figure 8, diagonal lawnmower, and slalom. ``augment_train`` appends the
+    figure 8, diagonal lawnmower, random trajectory, and slalom. ``augment_train`` appends the
     left–right mirror of every training prefix.
     """
     found = load_named(root)

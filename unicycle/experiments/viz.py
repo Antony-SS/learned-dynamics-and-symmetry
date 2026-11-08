@@ -116,7 +116,7 @@ def _rollout_xy(
     start_s: float,
     window_s: float,
     device: torch.device,
-) -> tuple[np.ndarray, np.ndarray] | None:
+) -> tuple[np.ndarray, np.ndarray]:
     """Ground-truth and predicted XY for one open-loop segment."""
     start = min(max(int(round(start_s / log.dt)), 0), log.n_steps - 1)
     steps = min(max(int(round(window_s / log.dt)), 1), log.n_steps - start)
@@ -151,11 +151,7 @@ def plot_test_rollouts(
     for row, log in enumerate(logs):
         for col, start_s in enumerate(starts_s):
             ax = axes[row, col]
-            segment = _rollout_xy(model, log, start_s=start_s, window_s=window_s, device=device)
-            if segment is None:
-                ax.set_visible(False)
-                continue
-            gt, pred = segment
+            gt, pred = _rollout_xy(model, log, start_s=start_s, window_s=window_s, device=device)
             ax.plot(gt[:, 0], gt[:, 1], color="#9aa4b2", lw=2.0, label="ground truth")
             ax.plot(pred[:, 0], pred[:, 1], color="#c0392b", lw=1.4, ls="--", label="rollout")
             ax.scatter(gt[0, 0], gt[0, 1], c="k", s=18, zorder=3)

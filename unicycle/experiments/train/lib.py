@@ -1,4 +1,8 @@
-"""Open-loop window trainer. Best checkpoint is lowest val xyyaw at ``HORIZON_S``."""
+"""Open-loop window trainer.
+
+Adam, learning rate cosine-annealed from ``LR`` to ``LR_MIN`` over a fixed ``EPOCHS``.
+The best checkpoint is the epoch with the lowest val xyyaw at ``HORIZON_S``.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ from unicycle.experiments.utils.params import (
     HEADING_LENGTH,
     HORIZON_S,
     LR,
-    PATIENCE,
+    LR_MIN,
     RUNS,
     n_params,
     run_dir,
@@ -114,7 +118,6 @@ def train_family(
     *,
     device: torch.device | None = None,
     epochs: int = EPOCHS,
-    patience: int = PATIENCE,
 ) -> torch.nn.Module:
     device = train_device() if device is None else device
     torch.manual_seed(int(seed))
@@ -128,17 +131,17 @@ def train_family(
     train_p, train_r, train_u, train_y, train_dt = windows(train, HORIZON_S)
     val_p, val_r, val_u, val_y, val_dt = windows(val, HORIZON_S)
     opt = torch.optim.Adam(model.neural.parameters(), lr=LR)
+    schedule = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs, eta_min=LR_MIN)
     start_epoch = 1
     curve: list[dict] = []
     best_val = float("inf")
-    stale = 0
     if last_path.is_file():
         payload = torch.load(last_path, map_location="cpu", weights_only=False)
         load_state(model, payload)
         opt.load_state_dict(payload["optimizer"])
+        schedule.load_state_dict(payload["schedule"])
         curve = list(payload.get("curve", []))
         best_val = float(payload.get("best_val", float("inf")))
-        stale = int(payload.get("stale", 0))
         start_epoch = int(payload["epoch"]) + 1
         print(f"{family}  seed {seed}  resume epoch {start_epoch}  val {best_val:.6f}", flush=True)
     else:
@@ -173,34 +176,26 @@ def train_family(
         mark = ""
         if val_mean < best_val:
             best_val = val_mean
-            stale = 0
             torch.save({"state": snapshot(model), "epoch": epoch, "val": best_val, "seed": seed}, best_path)
             mark = "  saved"
-        else:
-            stale += 1
-        curve.append({"epoch": epoch, "train": train_mean, "val": val_mean})
+        lr = opt.param_groups[0]["lr"]
+        schedule.step()
+        curve.append({"epoch": epoch, "train": train_mean, "val": val_mean, "lr": lr})
         torch.save(
             {
                 "state": snapshot(model),
                 "optimizer": opt.state_dict(),
+                "schedule": schedule.state_dict(),
                 "epoch": epoch,
                 "curve": curve,
                 "best_val": best_val,
-                "stale": stale,
                 "seed": seed,
                 "family": family,
             },
             last_path,
         )
         write_json(folder / "curve.json", {"curve": curve, "best_val": best_val})
-        print(f"  {family}  seed {seed}  epoch {epoch:02d}  train {train_mean:.6f}  val {val_mean:.6f}{mark}", flush=True)
-        if patience > 0 and stale >= patience:
-            print(
-                f"  {family}  seed {seed}  stop after {epoch} epochs  "
-                f"no val improvement for {patience}",
-                flush=True,
-            )
-            break
+        print(f"  {family}  seed {seed}  epoch {epoch:02d}  train {train_mean:.6f}  val {val_mean:.6f}  lr {lr:.1e}{mark}", flush=True)
 
     payload = torch.load(best_path, map_location="cpu", weights_only=False)
     load_state(model, payload)

@@ -1,4 +1,4 @@
-"""Local page: scrub a collection, play a trained unicycle open-loop."""
+"""Local page: scrub a test collection, play a trained unicycle open-loop."""
 
 from __future__ import annotations
 
@@ -11,31 +11,61 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 import torch
 
-from unicycle.experiments.data import load_all, load_split
+from unicycle.experiments.data import TEST_LOGS, load_all, load_split
 from unicycle.experiments.models import PHYSICS, TRAIN_FAMILIES, load_state, make_model
 from unicycle.experiments.train.lib import _configure
-from unicycle.experiments.utils.params import HORIZON_S, RUNS, VIZ
+from unicycle.experiments.utils.params import HORIZON_S, RUNS, VIZ, eval_dir
 
 PAGE = VIZ / "interactive" / "index.html"
 HOST = "127.0.0.1"
 PORT = 8765
 
 
+SELECT_KEY = f"{HORIZON_S:g}s"  # test xyyaw at the training horizon picks the seed
+
+
+def _test_error(family: str, seed: int) -> float | None:
+    """Test xyyaw at ``SELECT_KEY``, or None if this run has no (current) result."""
+    path = eval_dir(family, seed) / "test.json"
+    ckpt = RUNS / family / f"seed_{seed}" / "best.pt"
+    if not path.is_file() or path.stat().st_mtime < ckpt.stat().st_mtime:
+        return None  # missing, or older than the checkpoint it would describe
+    try:
+        return float(json.loads(path.read_text())[SELECT_KEY]["xyyaw"])
+    except (KeyError, ValueError):
+        return None
+
+
 def list_checkpoints() -> list[dict]:
+    """One checkpoint per family: the seed with the lowest test error.
+
+    Seeds without a current test result are skipped. If no seed has one, fall
+    back to seed 0 (or the lowest trained seed if seed 0 is missing).
+    """
     if not RUNS.is_dir():
         return []
     rows = []
-    for path in sorted(RUNS.glob("*/*/best.pt")):
-        if "eval" in path.parts:
+    for family in TRAIN_FAMILIES:
+        seeds = sorted(
+            int(path.parent.name.split("_")[1]) for path in (RUNS / family).glob("seed_*/best.pt")
+        )
+        if not seeds:
             continue
-        family = path.parent.parent.name
-        if family not in TRAIN_FAMILIES:
-            continue
+        scored = [(err, seed) for seed in seeds if (err := _test_error(family, seed)) is not None]
+        if scored:
+            err, seed = min(scored)
+            note = f"best of {len(scored)}, test {SELECT_KEY} xyyaw {err:.2e}"
+        else:
+            seed = 0 if 0 in seeds else seeds[0]
+            note = "no test results"
+        path = RUNS / family / f"seed_{seed}" / "best.pt"
         rows.append(
             {
                 "id": str(path.relative_to(RUNS)),
-                "label": f"{family} / {path.parent.name} / {path.name}",
+                "label": f"{family} / seed {seed}",
                 "family": family,
+                "seed": seed,
+                "note": note,
                 "path": str(path),
             }
         )
@@ -44,7 +74,12 @@ def list_checkpoints() -> list[dict]:
 
 @lru_cache(maxsize=8)
 def _logs():
-    return load_all()
+    """Test-set collections only, in ``TEST_LOGS`` order."""
+    found = load_all()
+    missing = [name for name in TEST_LOGS if name not in found]
+    if missing:
+        raise FileNotFoundError(f"test collections not found: {missing}")
+    return {name: found[name] for name in TEST_LOGS}
 
 
 @lru_cache(maxsize=16)
@@ -174,6 +209,8 @@ def main() -> None:
     url = f"http://{HOST}:{PORT}/"
     print(f"unicycle interactive  {url}", flush=True)
     print(f"models  {RUNS}", flush=True)
+    for row in list_checkpoints():
+        print(f"  {row['label']:24s}  {row['note']}", flush=True)
     webbrowser.open(url)
     try:
         server.serve_forever()

@@ -10,9 +10,9 @@ State is `(x, y, yaw, v_body, ω_body)`. Commands are always commanded, never en
 
 ## Split
 
-Train (first 75% / last 25% val): `arc_straight`, `figure8_vertical`, `lawnmower_horizontal`, `lawnmower_vertical`, `random_trajectory`, `spiral`, `spiral_cw`.
+Train (first 75% / last 25% val): `arc_straight`, `figure8_vertical`, `lawnmower_horizontal`, `lawnmower_vertical`, `random_crawl`, `rounded_rects`, `rounded_rects_cw`, `spiral`, `spiral_cw`.
 
-Held-out test (whole collections): `figure8`, `lawnmower_diagonal`, `slalom`.
+Held-out test (whole collections): `figure8`, `lawnmower_diagonal`, `random_trajectory`, `slalom`.
 
 ## Physics baseline
 
@@ -24,7 +24,7 @@ Ideal unicycle on commanded `(v, ω)`: `Δx = v dt`, `Δy = 0`, `Δθ = ω dt`, 
 
 ## Trained families
 
-Same MLP (hidden 32 × 3). Output is packed `(Δx, Δy, Δθ, Δv, Δω)`. Body Δx and Δy rotate with heading; the next rates are `rates + (Δv, Δω)`.
+Same MLP (hidden 32 × 3). Output is `(Δx, Δy, Δθ, Δv, Δω)`: the learned models predict sideslip, no no-slip constraint. Body (Δx, Δy) rotates with heading; the next rates are `rates + (Δv, Δω)`. Checkpoints load strictly: a checkpoint whose shapes do not match the current model raises an error.
 
 ### Naive (`naive`)
 
@@ -73,4 +73,4 @@ python -m unicycle.experiments.interactive
 
 `--all` evaluates every seed that already has a checkpoint. Checkpoints: `runs/unicycle/<family>/seed_k/{best.pt,last.pt}`. Test metrics: `runs/unicycle/eval/<family>/seed_k/test.json`.
 
-`train/train.ipynb` starts with left/right counts, a commanded (v, ω) heatmap, then stills and gifs of every collection. It trains one seed (resumes `last.pt`). `eval/results.ipynb` prints test position / heading RMSE at 1 s, 10 s, 30 s, and the full log. `python -m unicycle.experiments.interactive` opens a local page: pick a `.pt` under `runs/unicycle/`, pick a collection, scrub the start time, play / stop the open-loop.
+`train/train.ipynb` starts with left/right counts, a commanded (v, ω) heatmap, then stills and gifs of every collection. It trains one seed (resumes `last.pt`). `eval/results.ipynb` prints test position / heading MAE at 1 s, 10 s, 30 s (error at that step, averaged over every start, as in the quad benchmark), and averaged along the full log. `python -m unicycle.experiments.interactive` opens a local page showing one checkpoint per family: the seed with the lowest test xyyaw at 10 s (seed 0 if no family has test results yet), on the four test collections only. Pick a collection, scrub the start time, play / stop the open-loop.

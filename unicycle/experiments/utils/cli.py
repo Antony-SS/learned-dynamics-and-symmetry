@@ -19,7 +19,7 @@ def _test_columns() -> str:
 def _fmt(row: dict) -> str:
     parts = []
     for key in [f"{h:g}s" for h in TEST_HORIZONS_S] + ["full"]:
-        parts.append(f"{row[key]['position_rmse']:.4f}/{row[key]['heading_rmse']:.3f}")
+        parts.append(f"{row[key]['position_mae']:.4f}/{row[key]['heading_mae']:.3f}")
     return "  ".join(parts)
 
 
@@ -41,7 +41,7 @@ def test_main(family: str) -> None:
     _train, _val, test = load_split()
     if family == PHYSICS:
         model = load_physics(device)
-        print(f"{'seed':6s}  pos/heading RMSE at {_test_columns()}", flush=True)
+        print(f"{'seed':6s}  pos/heading MAE at {_test_columns()}", flush=True)
         row = eval_model(model, test, family, 0, device=device)
         print(f"{'phys':<6s}  {_fmt(row)}", flush=True)
         return
@@ -50,7 +50,7 @@ def test_main(family: str) -> None:
         seeds = [args.seed]
     if not seeds:
         raise SystemExit(f"no checkpoints under runs/unicycle/{family}/")
-    print(f"{'seed':6s}  pos/heading RMSE at {_test_columns()}", flush=True)
+    print(f"{'seed':6s}  pos/heading MAE at {_test_columns()}", flush=True)
     for seed in seeds:
         model = load_trained(family, seed, device=device)
         row = eval_model(model, test, family, seed, device=device)

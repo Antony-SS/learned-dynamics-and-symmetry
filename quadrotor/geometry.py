@@ -24,12 +24,19 @@ def so3_exp(phi: np.ndarray) -> np.ndarray:
     return np.eye(3) + np.sin(theta) * skew_unit + (1.0 - np.cos(theta)) * (skew_unit @ skew_unit)
 
 
+# SO(3) log branches. θ = atan2(sin θ, cos θ) is accurate at every angle; only the
+# axis needs care. Near 0 the scale θ / sin θ uses its Taylor series. Near π the
+# skew part of R vanishes, so the axis comes from the symmetric part instead:
+# (R + Rᵀ)/2 - cos θ I = (1 - cos θ) a aᵀ, with the sign taken from the skew part.
+_LOG_SMALL_SINE = 1e-4
+_LOG_NEAR_PI_SINE = 0.1  # with cos θ < 0, i.e. θ > ~174 deg
+
+
 def so3_log_batch(rotations: np.ndarray) -> np.ndarray:
     """Rotation vectors of a stack of matrices. Shape ``(N, 3, 3)`` to ``(N, 3)``."""
     rotations = np.asarray(rotations, dtype=float)
-    cosine = np.clip((rotations[:, 0, 0] + rotations[:, 1, 1] + rotations[:, 2, 2] - 1.0) / 2.0, -1.0, 1.0)
-    theta = np.arccos(cosine)
-    vee = np.stack(
+    cosine = np.clip((np.trace(rotations, axis1=1, axis2=2) - 1.0) / 2.0, -1.0, 1.0)
+    half_vee = 0.5 * np.stack(
         (
             rotations[:, 2, 1] - rotations[:, 1, 2],
             rotations[:, 0, 2] - rotations[:, 2, 0],
@@ -37,11 +44,25 @@ def so3_log_batch(rotations: np.ndarray) -> np.ndarray:
         ),
         axis=1,
     )
-    scale = np.empty_like(theta)
-    small = theta <= _ANGLE_EPS
-    scale[small] = 0.5
-    scale[~small] = theta[~small] / (2.0 * np.sin(theta[~small]))
-    return scale[:, None] * vee
+    sine = np.linalg.norm(half_vee, axis=1)
+    theta = np.arctan2(sine, cosine)
+    small = (sine < _LOG_SMALL_SINE) & (cosine > 0.0)
+    near_pi = (sine < _LOG_NEAR_PI_SINE) & (cosine < 0.0)
+    out = np.empty_like(half_vee)
+    out[small] = (1.0 + theta[small] ** 2 / 6.0)[:, None] * half_vee[small]
+    generic = ~(small | near_pi)
+    out[generic] = (theta[generic] / sine[generic])[:, None] * half_vee[generic]
+    if near_pi.any():
+        r = rotations[near_pi]
+        c = cosine[near_pi]
+        sym = 0.5 * (r + np.swapaxes(r, 1, 2)) - c[:, None, None] * np.eye(3)
+        diag = np.diagonal(sym, axis1=1, axis2=2)
+        k = np.argmax(diag, axis=1)
+        rows = np.arange(len(k))
+        axis = sym[rows, :, k] / np.sqrt(np.maximum(diag[rows, k] * (1.0 - c), 1e-300))[:, None]
+        sign = np.where(np.einsum("ni,ni->n", axis, half_vee[near_pi]) < 0.0, -1.0, 1.0)
+        out[near_pi] = (sign * theta[near_pi])[:, None] * axis
+    return out
 
 
 def project_rotation(rotation: np.ndarray) -> np.ndarray:
@@ -104,8 +125,25 @@ def _so3_log(rotation: torch.Tensor) -> torch.Tensor:
     )
     sine = torch.linalg.vector_norm(half_vee, dim=-1)
     theta = torch.atan2(sine, cosine)
-    scale = torch.where(sine < _ANGLE_EPS, torch.ones_like(sine), theta / sine)
-    return scale.unsqueeze(-1) * half_vee
+    small = (sine < _LOG_SMALL_SINE) & (cosine > 0.0)
+    near_pi = (sine < _LOG_NEAR_PI_SINE) & (cosine < 0.0)
+    # Every branch is evaluated, so denominators are made safe on the rows a
+    # branch does not own; otherwise their NaN/inf would leak into the gradient.
+    sine_safe = torch.where(small | near_pi, torch.ones_like(sine), sine)
+    scale = torch.where(small, 1.0 + theta.square() / 6.0, theta / sine_safe)
+    generic = scale.unsqueeze(-1) * half_vee
+    if not bool(near_pi.any()):
+        return generic
+    eye = torch.eye(3, device=rotation.device, dtype=rotation.dtype)
+    sym = 0.5 * (rotation + rotation.transpose(-1, -2)) - cosine[..., None, None] * eye
+    diag = torch.diagonal(sym, dim1=-2, dim2=-1)
+    k = diag.argmax(dim=-1, keepdim=True)
+    column = torch.gather(sym, -1, k.unsqueeze(-2).expand(*sym.shape[:-1], 1)).squeeze(-1)
+    diag_k = torch.gather(diag, -1, k).squeeze(-1)
+    denom = torch.where(near_pi, diag_k * (1.0 - cosine), torch.ones_like(diag_k)).clamp_min(1e-30).sqrt()
+    axis = column / denom.unsqueeze(-1)
+    sign = torch.where((axis * half_vee).sum(-1) < 0.0, -torch.ones_like(sine), torch.ones_like(sine))
+    return torch.where(near_pi.unsqueeze(-1), (sign * theta).unsqueeze(-1) * axis, generic)
 
 
 def _features(

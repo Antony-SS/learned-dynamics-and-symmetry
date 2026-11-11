@@ -50,6 +50,16 @@ Their analytic RK4, with the leftover on the quotient and **no** morphological a
 
 
 
+#### `PhysQuotientAug` (`phys_quotient_aug`)
+
+Exactly the `PhysQuotient` model, trained on mirror-augmented data: every training flight plus its three Z₂×Z₂ images (`quadrotor.symmetry.orbit_flights`). The mirror maps `p ↦ Mp`, `v ↦ Mv`, `R ↦ MRM`, `ω ↦ (det M) M ω`, and permutes rotors with the same tables `Orbit` uses. Validation flights and the loss scale stay unmirrored, so the objective is the same as `PhysQuotient`.
+
+- **Input:** 13-D quotient, one pass (no orbit). 4× the training windows (~2.5 h per seed on MPS).
+- **Output:** body residual after frozen RK4.
+- **Measures:** symmetry learned from data (approximate) vs built into the architecture (`PhysQuotientSym`, exact).
+
+
+
 #### `PhysQuotientSym` (`phys_quotient_sym`)
 
 Same as `PhysQuotient`, plus Z₂×Z₂ Reynolds averaging on the residual.
@@ -74,6 +84,7 @@ No Crazyflie force or torque model. The network predicts the whole step, and we 
 | `physics` (loaded)  | `PhysQuadModel`           | analytic RK4         | world 12-D + `Ω`       | next world 12-D              |
 | `phys_res` (loaded) | `PhysResQuadModel`        | RK4 + world leftover | norm. world 12-D + `Ω` | world `x_phys + Δx`          |
 | `phys_quotient`     | `PhysQuotient`            | RK4 + leftover       | quotient 13-D          | body 12-D after RK4          |
+| `phys_quotient_aug` | `PhysQuotientAug`         | RK4 + leftover       | quotient 13-D, mirror-augmented data | body 12-D after RK4 |
 | `phys_quotient_sym` | `PhysQuotientSym`         | RK4 + leftover       | quotient 13-D, orbit   | body 12-D after RK4          |
 | `sym_quad_dynamics` | `SymmetryQuadDynamicsNet` | rigid-body Exp only  | quotient 13-D, orbit   | body 12-D from current state |
 

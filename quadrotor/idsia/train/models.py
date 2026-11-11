@@ -1,11 +1,13 @@
-"""The three leftover families we train.
+"""The leftover families we train.
 
 - ``phys_quotient``: frozen Crazyflie RK4 + body residual on the quotient
+- ``phys_quotient_aug``: same model as ``phys_quotient``, trained on mirror-augmented flights
 - ``phys_quotient_sym``: same RK4 + residual, Reynolds-averaged over Z₂×Z₂
 - ``sym_quad_dynamics``: quotient + Z₂×Z₂, rigid-body integrate (no analytic Crazyflie model)
 
 The MLP always writes body ``(Δp, Δv, Δθ, Δω)``. Polar parts lift through ``R``.
-Published phys+res stays a loaded baseline in ``baselines/``.
+- ``phys_res_retrain``: their phys+res (RK4 + MLP on the normalized world chart),
+  retrained here; the published checkpoint stays a loaded baseline in ``baselines/``.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ import torch
 import torch.nn as nn
 
 from quadrotor.geometry import _so3_exp
-from quadrotor.idsia.baselines.published import BaseQuadModel, PhysQuadModel
+from quadrotor.idsia.baselines.published import BaseQuadModel, PhysQuadModel, PhysResQuadModel, ResidualQuadModel
 from quadrotor.symmetry import Orbit, Quotient, apply_body_dx, quotient, symmetrize_feature_stats
 
 HIDDEN = 64
@@ -97,6 +99,13 @@ class PhysQuotient(PhysicsResidual):
         super().__init__(NaiveResidual(13, hidden, n_hidden), Quotient())
 
 
+class PhysQuotientAug(PhysQuotient):
+    """``PhysQuotient`` unchanged. Only the training data differs: every train
+    flight plus its three Z₂×Z₂ mirror images (see ``train.lib._prepare``)."""
+
+    family = "phys_quotient_aug"
+
+
 class PhysQuotientSym(PhysicsResidual):
     """Physics + orbit-averaged body residual on the 13-D quotient."""
 
@@ -104,6 +113,36 @@ class PhysQuotientSym(PhysicsResidual):
 
     def __init__(self, hidden: int = HIDDEN, n_hidden: int = N_HIDDEN) -> None:
         super().__init__(Orbit(NaiveResidual(13, hidden, n_hidden)), Quotient())
+
+
+class PhysResRetrain(PhysResQuadModel):
+    """Their physics + residual, same architecture as the published checkpoint
+    (frozen RK4 with ω̇ = 0, 5×64 MLP on normalized world ``(p, v, log R, ω, Ω)``),
+    trained with our recipe. Rolls out in real units like every other family."""
+
+    family = "phys_res_retrain"
+
+    def __init__(self) -> None:
+        super().__init__(PhysQuadModel(zero_omega_dot=True), ResidualQuadModel(hidden_dim=64, num_layers=5))
+
+    def set_feature_stats(self, mean: torch.Tensor, scale: torch.Tensor) -> None:
+        del mean, scale  # uses the world scalers below, not quotient feature stats
+
+    def set_world_scalers(self, x_mean, x_scale, u_mean, u_scale) -> None:
+        with torch.no_grad():
+            for name, value in (("x_mean", x_mean), ("x_scale", x_scale), ("u_mean", u_mean), ("u_scale", u_scale)):
+                getattr(self, name).copy_(torch.as_tensor(value).to(getattr(self, name)))
+
+    def forward(self, x0: torch.Tensor, u_seq: torch.Tensor) -> torch.Tensor:
+        """Open-loop rollout in real units (``one_step`` itself works in the normalized chart)."""
+        if u_seq.ndim == 2:
+            u_seq = u_seq.unsqueeze(1)
+        x = x0.squeeze(1) if x0.ndim == 3 else x0
+        preds = []
+        for index in range(u_seq.shape[1]):
+            x = self.step_real(x, u_seq[:, index])
+            preds.append(x.unsqueeze(1))
+        return torch.cat(preds, dim=1)
 
 
 class SymmetryQuadDynamicsNet(NaiveBodyStep):
@@ -116,8 +155,12 @@ class SymmetryQuadDynamicsNet(NaiveBodyStep):
 
 
 def make_model(family: str, symmetric: bool = True) -> nn.Module:
+    if family == "phys_res_retrain":
+        return PhysResRetrain()
     if family == "phys_quotient":
         return PhysQuotient()
+    if family == "phys_quotient_aug":
+        return PhysQuotientAug()
     if family == "phys_quotient_sym":
         return PhysQuotientSym() if symmetric else PhysQuotient()
     if family in {"sym_quad_dynamics", "quad_dynamics"}:
@@ -130,7 +173,9 @@ __all__ = [
     "NaiveBodyStep",
     "PhysicsResidual",
     "PhysQuotient",
+    "PhysQuotientAug",
     "PhysQuotientSym",
+    "PhysResRetrain",
     "SymmetryQuadDynamicsNet",
     "make_model",
     "quotient",

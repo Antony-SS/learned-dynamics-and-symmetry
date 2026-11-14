@@ -28,7 +28,6 @@ Unicycle Robotarium logs are not in this repo. Download the [Robotarium dataset]
 
 ## Layout
 
-- `src/learned_dynamics`: MLP and the full-batch trainer.
 - `unicycle`: SE(2) geometry and dynamics wrappers. Robotarium experiments live in `unicycle/experiments/`.
 - `quadrotor/flight.py` and `quadrotor/geometry.py`: `PreparedFlight` and SO(3) / kinematics.
 - `quadrotor/idsia`: Busetto et al. Crazyflie sys-id.
@@ -44,3 +43,7 @@ uv run python -m unicycle.experiments.interactive
 Open `unicycle/experiments/train/train.ipynb` or `quadrotor/idsia/train/train.ipynb` with the `.venv` kernel.
 
 The IDSIA benchmark is from Busetto et al., *Control Engineering Practice* 172 (2026), 106871.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

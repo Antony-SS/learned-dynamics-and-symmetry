@@ -2,8 +2,9 @@
 
 Reimplements Busetto et al. PhysQuadModel / ResidualQuadModel / PhysResQuadModel
 so we can load their published checkpoints and roll them with our integrator.
-We do not retrain these baselines: physics+residual is always the authors'
-released ``phys+res_random_square_chirp.pt``.
+``load_phys_res`` loads the authors' released ``phys+res_random_square_chirp.pt``.
+We also retrain the same physics+residual architecture from scratch as the
+``phys_res_retrain`` family (see ``quadrotor.idsia.train.models``).
 
 Their published PhysQuadModel multiplies omega_dot by 0 (angular velocity is
 held at the window seed while thrust still integrates). Physics-only and the

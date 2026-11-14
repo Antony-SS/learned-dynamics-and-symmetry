@@ -1,13 +1,13 @@
 # Learning dynamics
 
-Incorporating continuous and morphological symmetries for learned robot dynamics.  This repository accompanies the paper available [HERE - Add Link].  
+Incorporating continuous and morphological symmetries of the body for learned robot dynamics.  This repository accompanies the paper available [HERE - Add Link].  
 
-The repository is broken down by platform, with a folder for each.  Currently we have code and data for:
+The repository is broken down by robot platform, with a folder for each.  Currently we have code and data for:
 
 - Quadrotors
 - Differentiable Drive Unicycle Robots
 
-We evaluate only on real robot data and each platform comes with an associated dataset for evaluation.
+We evaluate and train only on real robot data and each platform comes with an associated dataset.
 
 ## Setup
 

@@ -1,6 +1,6 @@
 """Quotient features, the left–right mirror average, and the body-increment lift.
 
-This module is the reusable layer. It wraps *any* MLP ``ℝ⁴ → ℝ⁴`` so that the
+This module is the reusable layer. It wraps *any* MLP ``ℝ⁴ → ℝ⁵`` so that the
 resulting unicycle model is
 
 * **invariant** to translating and rotating the arena, because the MLP only
@@ -9,16 +9,16 @@ resulting unicycle model is
   :class:`SymmetricQuotientMLP` averages the MLP over both mirror images.
 
 The MLP itself is unconstrained. It writes a body-frame increment
-``(Δx, Δθ, Δv, Δω)``. Sideslip Δy is fixed at 0. :func:`pack_no_slip` inserts it,
-and :func:`apply_body_dx` lifts the increment to the next pose and rates.
+``(Δx, Δy, Δθ, Δv, Δω)``, including sideslip Δy (no no-slip constraint is
+imposed), and :func:`apply_body_dx` lifts the increment to the next pose and rates.
 
 Typical use::
 
-    net = MyMLP(in_dim=4, out_dim=4)            # any nn.Module
+    net = MyMLP(in_dim=4, out_dim=5)            # any nn.Module
     model = SymmetricQuotientMLP(net)
     mean, scale = symmetrize_feature_stats(mean, scale)   # see below
     dx = model((quotient_features(rates, command) - mean) / scale)
-    next_pose, next_rates = apply_body_dx(pose, rates, pack_no_slip(dx))
+    next_pose, next_rates = apply_body_dx(pose, rates, dx)
 
 Normalization contract
 ----------------------
@@ -38,12 +38,13 @@ import torch.nn as nn
 BASE_LENGTH = 0.105
 N_GROUP = 2
 QUOTIENT_DIM = 4
-INCREMENT_DIM = 4
+INCREMENT_DIM = 5
 
 # The two elements of Z₂: identity, then the left–right mirror (reflection
 # through the body xz plane, which swaps the wheels).
 #
-# Polar quantities (v, v_cmd, Δx, Δv) are unchanged. Axial quantities
+# Polar quantities (v, v_cmd, Δx, Δv) are unchanged; sideslip Δy flips (it points
+# along the mirrored body y axis). Axial quantities
 # (ω, ω_cmd, Δθ, Δω) flip sign. Swapping the wheels, (left, right) ↦
 # (right, left), is exactly "v stays, ω flips".
 #
@@ -52,10 +53,10 @@ GROUP_FEAT_SIGN = (
     (1.0, 1.0, 1.0, 1.0),
     (1.0, -1.0, 1.0, -1.0),
 )
-# Increment: (Δx, Δθ, Δv, Δω).
+# Increment: (Δx, Δy, Δθ, Δv, Δω).
 GROUP_DX_SIGN = (
-    (1.0, 1.0, 1.0, 1.0),
-    (1.0, -1.0, 1.0, -1.0),
+    (1.0, 1.0, 1.0, 1.0, 1.0),
+    (1.0, -1.0, -1.0, 1.0, -1.0),
 )
 
 
@@ -92,16 +93,10 @@ def apply_pose_dx(pose: torch.Tensor, dx_pose: torch.Tensor) -> torch.Tensor:
     return torch.stack((x, y, theta), dim=-1)
 
 
-def pack_no_slip(dx: torch.Tensor) -> torch.Tensor:
-    """``(Δx, Δθ, Δv, Δω)`` → ``(Δx, 0, Δθ, Δv, Δω)``, inserting zero sideslip."""
-    zero = torch.zeros_like(dx[..., :1])
-    return torch.cat((dx[..., 0:1], zero, dx[..., 1:]), dim=-1)
-
-
 def apply_body_dx(
     pose: torch.Tensor, rates: torch.Tensor, dx_body: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply a packed increment ``(Δx, Δy, Δθ, Δv, Δω)``.
+    """Apply a body increment ``(Δx, Δy, Δθ, Δv, Δω)``.
 
     Returns the next pose (body step composed onto ``pose``) and the next rates
     ``rates + (Δv, Δω)``.
@@ -216,8 +211,7 @@ class SymmetricQuotientMLP(nn.Module):
         docstring).
 
     Output:
-        ``(B, 4)`` body increment ``(Δx, Δθ, Δv, Δω)``. Use :func:`pack_no_slip`
-        to add Δy = 0.
+        ``(B, 5)`` body increment ``(Δx, Δy, Δθ, Δv, Δω)``.
     """
 
     def __init__(self, net: nn.Module) -> None:

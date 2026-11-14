@@ -1,4 +1,4 @@
-"""Commanded body-step families. Output is (Δx, 0, Δθ, Δv, Δω)."""
+"""Commanded body-step families. Learned output is (Δx, Δy, Δθ, Δv, Δω)."""
 
 from __future__ import annotations
 
@@ -11,15 +11,12 @@ from unicycle.symmetry import (
     WorldFeatures,
     apply_body_dx,
     apply_pose_dx,
-    pack_no_slip,
     physics_body_dx,
     symmetrize_feature_stats,
 )
 
 HIDDEN = 32
 N_HIDDEN = 3
-# Old checkpoints wrote ``(Δx, Δy, Δθ, Δv, Δω)``; ``BodyMlp`` now writes four and ``pack_no_slip`` inserts Δy.
-_LEGACY_OUT_ROWS = (0, 2, 3, 4)
 
 NAIVE = "naive"
 QUOTIENT = "quotient"
@@ -31,7 +28,7 @@ FAMILIES = (PHYSICS,) + TRAIN_FAMILIES
 
 
 class BodyMlp(nn.Module):
-    """Geometry-free MLP. Writes ``(Δx, Δθ, Δv, Δω)``; Δy is filled with 0."""
+    """Geometry-free MLP. Writes ``(Δx, Δy, Δθ, Δv, Δω)``."""
 
     def __init__(self, in_dim: int, hidden: int = HIDDEN, n_hidden: int = N_HIDDEN) -> None:
         super().__init__()
@@ -41,7 +38,7 @@ class BodyMlp(nn.Module):
             layers += [nn.Linear(dim, hidden), nn.ReLU()]
             dim = int(hidden)
         self.mlp = nn.Sequential(*layers)
-        self.out = nn.Linear(dim, 4)
+        self.out = nn.Linear(dim, 5)
         nn.init.zeros_(self.out.weight)
         nn.init.zeros_(self.out.bias)
 
@@ -67,8 +64,9 @@ class BodyStep(nn.Module):
             self.feat_scale.copy_(scale.reshape_as(self.feat_scale).to(self.feat_scale).clamp_min(1e-6))
 
     def body_dx(self, pose: torch.Tensor, rates: torch.Tensor, command: torch.Tensor) -> torch.Tensor:
+        """Body increment ``(Δx, Δy, Δθ, Δv, Δω)``, sideslip included."""
         feat = (self.feature_map(pose, rates, command) - self.feat_mean) / self.feat_scale
-        return pack_no_slip(self.neural(feat))
+        return self.neural(feat)
 
     def step(
         self,
@@ -115,23 +113,9 @@ class PhysicsUnicycle(nn.Module):
         return torch.stack(preds, dim=-2)
 
 
-def adapt_checkpoint_state(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Map 5-D MLP heads from older runs onto the current 4-D ``BodyMlp``."""
-    adapted = dict(state)
-    for key, tensor in state.items():
-        if not key.endswith(".out.weight") or tensor.shape[0] != 5:
-            continue
-        rows = tensor.new_tensor(_LEGACY_OUT_ROWS, dtype=torch.long)
-        adapted[key] = tensor.index_select(0, rows)
-        bias_key = key.replace(".weight", ".bias")
-        if bias_key in state and state[bias_key].shape[0] == 5:
-            adapted[bias_key] = state[bias_key].index_select(0, rows)
-    return adapted
-
-
-def load_state(model: nn.Module, payload: dict | dict[str, torch.Tensor]) -> None:
-    state = payload["state"] if isinstance(payload, dict) and "state" in payload else payload
-    model.load_state_dict(adapt_checkpoint_state(state), strict=False)
+def load_state(model: nn.Module, payload: dict) -> None:
+    """Load a checkpoint payload ``{"state": ...}``. Strict: any mismatch raises."""
+    model.load_state_dict(payload["state"])
 
 
 def make_model(family: str) -> nn.Module:

@@ -47,7 +47,15 @@ BASELINES = (PHYSICS, PHYS_RES)
 SYM_QUAD_DYNAMICS = "sym_quad_dynamics"
 PHYS_QUOTIENT = "phys_quotient"
 PHYS_QUOTIENT_SYM = "phys_quotient_sym"
-TRAIN_FAMILIES = (PHYS_QUOTIENT, PHYS_QUOTIENT_SYM, SYM_QUAD_DYNAMICS)
+# Same network as phys_quotient, trained on every flight plus its three Z₂×Z₂
+# mirror images (quadrotor.symmetry.orbit_flights). Validation stays unmirrored.
+PHYS_QUOTIENT_AUG = "phys_quotient_aug"
+AUGMENTED_FAMILIES = (PHYS_QUOTIENT_AUG,)
+# Their phys+res architecture (frozen RK4 + normalized-world MLP) retrained
+# with the same recipe and seeds as our families. Separate name, so it never
+# collides with the published checkpoint's eval under ``phys_res``.
+PHYS_RES_RETRAIN = "phys_res_retrain"
+TRAIN_FAMILIES = (PHYS_RES_RETRAIN, PHYS_QUOTIENT, PHYS_QUOTIENT_AUG, PHYS_QUOTIENT_SYM, SYM_QUAD_DYNAMICS)
 FAMILIES = BASELINES + TRAIN_FAMILIES
 
 

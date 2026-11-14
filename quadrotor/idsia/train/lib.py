@@ -11,8 +11,10 @@ import torch
 from quadrotor.geometry import train_device
 from quadrotor.idsia.baselines.published import _windows, fit_canonical_scalers, fit_scalers
 from quadrotor.idsia.data.load import load_idsia_prepared
+from quadrotor.symmetry import N_GROUP, mirror_windows, orbit_flights
 from quadrotor.idsia.train.models import make_model
 from quadrotor.idsia.utils.idsia_training_reproduction_params import (
+    AUGMENTED_FAMILIES,
     BATCH,
     EPOCHS,
     HORIZON,
@@ -43,12 +45,19 @@ def _feature_stats(_family: str, flights):
 
 
 def _prepare(family: str, train, val):
-    x_mean, x_scale, _u_mean, _u_scale = fit_scalers(train)
-    feat_mean, feat_scale = _feature_stats(family, train)
+    # The loss scale always comes from the unmirrored train flights, so every
+    # family optimizes the same objective. Augmented families keep the same
+    # unmirrored training windows (same count, steps and epochs as the others)
+    # and are mirrored on the fly in ``train_family``; their feature statistics
+    # come from the flights plus mirrors, the distribution they actually see.
+    x_mean, x_scale, u_mean, u_scale = fit_scalers(train)
+    stats_flights = orbit_flights(train) if family in AUGMENTED_FAMILIES else train
+    feat_mean, feat_scale = _feature_stats(family, stats_flights)
     train_x, train_u, train_y = _windows(train, HORIZON, stride=STRIDE)
     val_x, val_u, val_y = _windows(val, HORIZON, stride=STRIDE)
     return {
         "x_scale": x_scale,
+        "world_scalers": (x_mean, x_scale, u_mean, u_scale),
         "feat_mean": feat_mean,
         "feat_scale": feat_scale,
         "train_x": train_x,
@@ -63,6 +72,8 @@ def _prepare(family: str, train, val):
 def _configure(model, stats, device):
     model = model.to(device)
     model.set_feature_stats(stats["feat_mean"].to(device), stats["feat_scale"].to(device))
+    if hasattr(model, "set_world_scalers"):  # phys_res_retrain normalizes the world state itself
+        model.set_world_scalers(*stats["world_scalers"])
     return model
 
 
@@ -117,7 +128,8 @@ def train_family(
     else:
         print(
             f"{family}  seed {seed}  params {n_params(model)}  windows {len(train_x)}  "
-            f"stride {STRIDE}  Adam {LR_START:g}→{LR_END:g}  WeightedMSE",
+            f"stride {STRIDE}  Adam {LR_START:g}→{LR_END:g}  WeightedMSE"
+            + ("  random Z2xZ2 mirror per window" if family in AUGMENTED_FAMILIES else ""),
             flush=True,
         )
 
@@ -129,8 +141,11 @@ def train_family(
         batches = 0
         for start in range(0, n, BATCH):
             index = order[start : start + BATCH]
-            pred = model(train_x[index].to(device), train_u[index].to(device))
-            loss = scaled_loss(pred, train_y[index].to(device), x_scale, weights)
+            bx, bu, by = train_x[index], train_u[index], train_y[index]
+            if family in AUGMENTED_FAMILIES:  # one random group element per window, every draw
+                bx, bu, by = mirror_windows(bx, bu, by, torch.randint(0, N_GROUP, (len(index),)))
+            pred = model(bx.to(device), bu.to(device))
+            loss = scaled_loss(pred, by.to(device), x_scale, weights)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -199,7 +214,7 @@ def load_trained(family: str, seed: int, device: torch.device | None = None, sym
     if family not in TRAIN_FAMILIES:
         raise ValueError(
             f"{family!r} is not a trained family {TRAIN_FAMILIES}. "
-            "The physics+residual baseline is the published checkpoint: use baselines.load_phys_res()."
+            "The published physics+residual checkpoint is loaded with baselines.load_phys_res()."
         )
     path = run_dir(family, seed) / "best.pt"
     if not path.is_file():

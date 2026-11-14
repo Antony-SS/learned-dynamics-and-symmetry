@@ -1,4 +1,12 @@
-"""Test-set xyyaw error at ``TEST_HORIZONS_S`` and the full collection."""
+"""Test-set MAE at ``TEST_HORIZONS_S`` and over the full collection.
+
+Matches the quadrotor benchmark (``quadrotor.evaluate.benchmark_mae``): at a
+horizon of h seconds, the error is the norm of the position error and the
+absolute wrapped heading error *at step h*, averaged over every start window.
+"full" rolls out each test collection once from its first pose and averages
+the same errors over every step, then over collections. ``xyyaw`` is the
+training loss over the window (all steps) and is kept for model selection.
+"""
 
 from __future__ import annotations
 
@@ -16,11 +24,30 @@ from unicycle.experiments.utils.params import EVAL, TEST_HORIZONS_S, eval_dir
 from unicycle.symmetry import wrap_angle
 
 
-def _horizon_errors(pred: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
-    dxy = pred[..., :2] - target[..., :2]
-    pos = float(torch.sqrt((dxy ** 2).sum(dim=-1).mean()))
-    heading = float(torch.sqrt((wrap_angle(pred[..., 2] - target[..., 2]) ** 2).mean()))
-    return {"position_rmse": pos, "heading_rmse": heading, "xyyaw": float(xyyaw_loss(pred, target))}
+def metric_keys() -> tuple[str, ...]:
+    """Keys on rows returned by :func:`eval_model` (matches ``TEST_HORIZONS_S``)."""
+    return tuple(f"{h:g}s" for h in TEST_HORIZONS_S) + ("full",)
+
+
+def format_eval_row(row: dict) -> str:
+    parts = []
+    for key in metric_keys():
+        parts.append(
+            f"{key} {row[key]['position_mae']:.4f} m / {row[key]['heading_mae']:.3f} rad"
+        )
+    seed = row.get("seed", "")
+    return f"{row['family']} {seed}  " + " |".join(parts)
+
+
+def _errors(pred: torch.Tensor, target: torch.Tensor, *, endpoint: bool) -> dict[str, float]:
+    """Position and heading MAE at the last step (``endpoint``) or over all steps."""
+    if endpoint:
+        pred_at, target_at = pred[..., -1:, :], target[..., -1:, :]
+    else:
+        pred_at, target_at = pred, target
+    pos = float(torch.linalg.vector_norm(pred_at[..., :2] - target_at[..., :2], dim=-1).mean())
+    heading = float(wrap_angle(pred_at[..., 2] - target_at[..., 2]).abs().mean())
+    return {"position_mae": pos, "heading_mae": heading, "xyyaw": float(xyyaw_loss(pred, target))}
 
 
 def _windows(logs: list[Trajectory], horizon_s: float):
@@ -58,7 +85,7 @@ def eval_horizon(model, logs: list[Trajectory], horizon_s: float, device: torch.
                 dt,
             ).cpu()
         )
-    return _horizon_errors(torch.cat(preds, dim=0), target)
+    return _errors(torch.cat(preds, dim=0), target, endpoint=True)
 
 
 @torch.no_grad()
@@ -70,13 +97,13 @@ def eval_full(model, logs: list[Trajectory], device: torch.device) -> dict[str, 
         command = torch.tensor(log.commands, dtype=torch.float32, device=device).unsqueeze(0)
         target = torch.tensor(log.poses[1:], dtype=torch.float32)
         pred = model.rollout(pose, rates, command, log.dt).cpu().squeeze(0)
-        row = _horizon_errors(pred, target)
-        pos.append(row["position_rmse"])
-        heading.append(row["heading_rmse"])
+        row = _errors(pred, target, endpoint=False)
+        pos.append(row["position_mae"])
+        heading.append(row["heading_mae"])
         xyyaw.append(row["xyyaw"])
     return {
-        "position_rmse": float(np.mean(pos)),
-        "heading_rmse": float(np.mean(heading)),
+        "position_mae": float(np.mean(pos)),
+        "heading_mae": float(np.mean(heading)),
         "xyyaw": float(np.mean(xyyaw)),
     }
 
@@ -101,10 +128,10 @@ def family_summary(family: str) -> dict:
         rows.append(json.loads(path.read_text()))
     if not rows:
         raise FileNotFoundError(f"no eval under {folder}")
-    keys = [f"{h:g}s" for h in TEST_HORIZONS_S] + ["full"]
+    keys = list(metric_keys())
     summary = {"family": family, "n": len(rows)}
     for key in keys:
-        for metric in ("position_rmse", "heading_rmse", "xyyaw"):
+        for metric in ("position_mae", "heading_mae", "xyyaw"):
             values = [row[key][metric] for row in rows]
             summary.setdefault(key, {})[metric] = {
                 "mean": float(np.mean(values)),

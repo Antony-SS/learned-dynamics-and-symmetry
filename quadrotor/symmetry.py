@@ -33,9 +33,13 @@ images.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import numpy as np
 import torch
 import torch.nn as nn
 
+from quadrotor.flight import PreparedFlight
 from quadrotor.geometry import _features, _so3_exp, _so3_log
 
 N_GROUP = 4
@@ -75,6 +79,60 @@ ORBIT_MOTORS = (
 ORBIT_GV = tuple(polar + polar for polar in ORBIT_POLAR)
 # Signs on the body rate ω (axial).
 ORBIT_W = ORBIT_AXIAL
+
+
+def mirror_flight(flight: PreparedFlight, index: int) -> PreparedFlight:
+    """Whole flight under group element ``index`` (0–3) of Z₂ × Z₂, for data augmentation.
+
+    With ``M = diag(ORBIT_POLAR[index])`` (a reflection or half turn that keeps
+    world and body z fixed, so gravity is unchanged)::
+
+        p ↦ M p,   v ↦ M v,   R ↦ M R M,   ω_body ↦ ORBIT_AXIAL[index] ⊙ ω_body,
+        Ω ↦ Ω[ORBIT_MOTORS[index]],   dt unchanged
+
+    This is the same action that :class:`Orbit` applies to quotient features
+    (``g_body = Rᵀ e_z ↦ M g_body``, ``v_body ↦ M v_body``), extended to the
+    world-frame state, so a model trained on mirrored flights sees the mirror
+    images that ``Orbit`` averages over.
+    """
+    if index == 0:
+        return flight
+    polar = np.asarray(ORBIT_POLAR[index], dtype=flight.position.dtype)
+    axial = np.asarray(ORBIT_AXIAL[index], dtype=flight.omega_body.dtype)
+    m = np.diag(polar)
+    return replace(
+        flight,
+        name=f"{flight.name} (mirror {index})",
+        position=flight.position * polar,
+        velocity_world=flight.velocity_world * polar,
+        rotation=(m @ flight.rotation @ m).astype(flight.rotation.dtype),
+        omega_body=flight.omega_body * axial,
+        motors=np.ascontiguousarray(flight.motors[:, list(ORBIT_MOTORS[index])]),
+        dt=flight.dt.copy(),
+    )
+
+
+def mirror_windows(
+    x: torch.Tensor, u: torch.Tensor, y: torch.Tensor, index: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Training windows under per-sample group elements, for on-the-fly augmentation.
+
+    ``x`` (B, 12) and ``y`` (B, T, 12) are packed ``(p, v, log R, ω)``; ``u`` is
+    (B, T, 4) rotor speeds; ``index`` (B,) holds group elements 0–3. Same action
+    as :func:`mirror_flight`: ``p, v`` take the polar signs, ``log R`` and ``ω``
+    the axial signs (``log(M R M) = det(M) M log R``), and rotors are permuted.
+    """
+    polar = torch.tensor(ORBIT_POLAR, dtype=x.dtype, device=x.device)
+    axial = torch.tensor(ORBIT_AXIAL, dtype=x.dtype, device=x.device)
+    signs = torch.cat((polar, polar, axial, axial), dim=-1)[index]  # (B, 12)
+    perm = torch.tensor(ORBIT_MOTORS, dtype=torch.long, device=u.device)[index]  # (B, 4)
+    u_m = torch.gather(u, -1, perm.unsqueeze(1).expand(-1, u.shape[1], -1))
+    return x * signs, u_m, y * signs.unsqueeze(1)
+
+
+def orbit_flights(flights: list[PreparedFlight]) -> list[PreparedFlight]:
+    """Every flight followed by its three mirror images (identity first)."""
+    return [mirror_flight(flight, index) for flight in flights for index in range(N_GROUP)]
 
 
 def quotient(

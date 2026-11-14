@@ -1,6 +1,13 @@
 # Learning dynamics
 
-Supervised learning of raw robot dynamics. The network predicts the observed step. The experimental knob is how the input is canonicalized.
+Incorporating continuous and morphological symmetries for learned robot dynamics.  This repository accompanies the paper available [HERE - Add Link].  
+
+The repository is broken down by platform, with a folder for each.  Currently we have code and data for:
+
+- Quadrotors
+- Differentiable Drive Unicycle Robots
+
+We evaluate only on real robot data and each platform comes with an associated dataset for evaluation.
 
 ## Setup
 
